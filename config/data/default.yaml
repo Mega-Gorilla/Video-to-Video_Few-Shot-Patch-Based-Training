@@ -1,0 +1,6 @@
+# config/data/default.yaml
+dir_pre: "data/input"
+dir_post: "data/output"
+dir_mask: "data/mask"
+patch_size: 32
+additional_channels: {}  # Optional additional input channels

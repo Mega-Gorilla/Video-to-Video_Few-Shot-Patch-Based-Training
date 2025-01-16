@@ -1,0 +1,16 @@
+# config/config.yaml
+defaults:
+  - _self_
+  - model: default
+  - optimizer: default
+  - training: default
+  - data: default
+  - override hydra/job_logging: default
+  - override hydra/hydra_logging: default
+
+hydra:
+  run:
+    dir: ${training.output_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.override_dirname}

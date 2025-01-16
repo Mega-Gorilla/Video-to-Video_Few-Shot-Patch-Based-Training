@@ -1,0 +1,36 @@
+# config/model/default.yaml
+
+# Generator configuration
+generator:
+  type: GeneratorJ
+  args:
+    use_bias: true
+    tanh: true
+    append_smoothers: true
+    resnet_blocks: 7
+    filters: [32, 64, 128, 128, 128, 64]
+    input_channels: 3
+    norm_layer: "instance_norm"  # Options: batch_norm, instance_norm, null
+    input_size: 256
+
+# Discriminator configuration
+discriminator:
+  type: DiscriminatorN_IN
+  args:
+    num_filters: 12
+    n_layers: 2
+    input_channels: 3
+    use_noise: false
+    noise_sigma: 0.2
+    norm_layer: "instance_norm"
+    use_bias: true
+
+# Perception loss configuration
+perception_loss:
+  weight: 6.0
+  perception_model:
+    type: PerceptualVGG19
+    args:
+      feature_layers: [0, 3, 5]
+      use_normalization: false
+      path: null  # Optional path to pre-trained weights

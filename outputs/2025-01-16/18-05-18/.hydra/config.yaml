@@ -1,0 +1,80 @@
+model:
+  generator:
+    type: GeneratorJ
+    args:
+      use_bias: true
+      tanh: true
+      append_smoothers: true
+      resnet_blocks: 7
+      filters:
+      - 32
+      - 64
+      - 128
+      - 128
+      - 128
+      - 64
+      input_channels: 3
+      norm_layer: instance_norm
+      gpu_ids: null
+      input_size: 256
+  discriminator:
+    type: DiscriminatorN_IN
+    args:
+      num_filters: 12
+      n_layers: 2
+      input_channels: 3
+      use_noise: false
+      noise_sigma: 0.2
+      norm_layer: instance_norm
+      use_bias: true
+  perception_loss:
+    weight: 6.0
+    perception_model:
+      type: PerceptualVGG19
+      args:
+        feature_layers:
+        - 0
+        - 3
+        - 5
+        use_normalization: false
+        path: null
+optimizer:
+  generator:
+    lr: 0.0004
+    betas:
+    - 0.9
+    - 0.999
+    weight_decay: 1.0e-05
+  discriminator:
+    lr: 0.0004
+    betas:
+    - 0.9
+    - 0.999
+    weight_decay: 1.0e-05
+training:
+  output_dir: outputs
+  max_epochs: 500
+  batch_size: 40
+  num_workers: 4
+  reconstruction_weight: 4.0
+  adversarial_weight: 0.5
+  use_image_loss: true
+  reconstruction_criterion: L1Loss
+  adversarial_criterion: MSELoss
+  learning_rate: 0.0004
+  early_stopping: true
+  early_stopping_patience: 20
+  accelerator: auto
+  devices: 1
+  precision: 32
+  accumulate_grad_batches: 1
+  gradient_clip_val: 0.5
+  deterministic: false
+  log_every_n_steps: 10
+  save_interval: 100
+data:
+  dir_pre: data/input
+  dir_post: data/output
+  dir_mask: data/mask
+  patch_size: 32
+  additional_channels: {}

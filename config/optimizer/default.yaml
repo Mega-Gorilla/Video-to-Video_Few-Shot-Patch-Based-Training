@@ -1,0 +1,10 @@
+# config/optimizer/default.yaml
+generator:
+  lr: 0.0004
+  betas: [0.9, 0.999]
+  weight_decay: 0.00001
+
+discriminator:
+  lr: 0.0004
+  betas: [0.9, 0.999]
+  weight_decay: 0.00001
