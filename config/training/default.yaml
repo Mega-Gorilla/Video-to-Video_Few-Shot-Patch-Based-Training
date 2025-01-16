@@ -2,7 +2,7 @@
 # Training settings
 output_dir: "outputs"  # 出力ベースディレクトリ
 max_epochs: 500       # 最大エポック数
-batch_size: 40        # バッチサイズ
+batch_size: 40        # 1回の学習ステップで処理する画像パッチの数
 num_workers: 4        # データローダーの並列数
 
 # 損失関数の重み設定
