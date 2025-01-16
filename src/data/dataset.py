@@ -124,6 +124,9 @@ class StyleTransferDataset(Dataset):
         # 画像のインデックスを計算
         img_idx = idx % len(self.images_pre)
         
+        # パッチ位置の記録用リスト
+        self.last_patch_positions = []
+
         # 有効なパッチの中心をランダムに選択
         if not self.valid_indices_left[img_idx]:
             # 使用可能なインデックスがなくなった場合、リセット
@@ -132,20 +135,23 @@ class StyleTransferDataset(Dataset):
         # ランダムに中心点を選択し、使用済みリストから削除
         center_idx = np.random.randint(0, len(self.valid_indices_left[img_idx]))
         midpoint = self.valid_indices[img_idx][self.valid_indices_left[img_idx][center_idx]]
-        del self.valid_indices_left[img_idx][center_idx]
+
+        # パッチ位置を記録
+        self.last_patch_positions.append(midpoint.tolist())
         
-        # 敵対的学習用のランダムな中心点を選択
+        # ランダムなmidpointのパッチ位置も記録
         midpoint_r = self.valid_indices[img_idx][np.random.randint(0, len(self.valid_indices[img_idx]))]
+        self.last_patch_positions.append(midpoint_r.tolist())
         
-        # パッチを切り出し
-        pre_patch = self._cut_patch(self.images_pre[img_idx], midpoint)    # 入力画像のパッチ
-        post_patch = self._cut_patch(self.images_post[img_idx], midpoint)  # 対応する目標画像のパッチ
-        random_patch = self._cut_patch(self.images_post[img_idx], midpoint_r)  # ランダムな位置の目標画像パッチ
+        # パッチの切り出し
+        pre_patch = self._cut_patch(self.images_pre[img_idx], midpoint)
+        post_patch = self._cut_patch(self.images_post[img_idx], midpoint)
+        random_patch = self._cut_patch(self.images_post[img_idx], midpoint_r)
         
         return {
-            'pre': pre_patch,      # 入力パッチ
-            'post': post_patch,    # 対応する目標パッチ
-            'already': random_patch # ランダムな位置の目標パッチ（敵対的学習用）
+            'pre': pre_patch,
+            'post': post_patch,
+            'already': random_patch
         }
 
     def __len__(self) -> int:
