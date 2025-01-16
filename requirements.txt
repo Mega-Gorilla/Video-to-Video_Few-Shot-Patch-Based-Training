@@ -2,3 +2,4 @@ hydra-core
 hydra-colorlog
 pytorch-lightning
 omegaconf
+tensorboard
