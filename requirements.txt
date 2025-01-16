@@ -3,3 +3,4 @@ hydra-colorlog
 pytorch-lightning
 omegaconf
 tensorboard
+netifaces
