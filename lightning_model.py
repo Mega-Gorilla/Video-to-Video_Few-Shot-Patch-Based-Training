@@ -1,3 +1,4 @@
+# lightning_model.py
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -75,6 +76,10 @@ class StyleTransferModel(pl.LightningModule):
         # オプティマイザーの取得
         opt_g, opt_d = self.optimizers()
 
+        # パッチ位置の記録（データセットから提供される場合）
+        if hasattr(self.train_dataset, 'last_patch_positions'):
+            batch['patch_positions'] = self.train_dataset.last_patch_positions
+
         # 識別器の学習
         if self.discriminator is not None:
             opt_d.zero_grad()  # 勾配の初期化
@@ -108,103 +113,74 @@ class StyleTransferModel(pl.LightningModule):
 
     def _generator_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """生成器の学習ステップ"""
-        # 画像の生成
         generated = self.generator(batch['pre'])
         
         # 損失の計算
         losses = {}
         
-        # 画像再構成損失の計算
+        # 画像再構成損失
         if self.training_config["use_image_loss"]:
             image_loss = self.reconstruction_criterion(generated, batch['post'])
-            losses['g_image_loss'] = image_loss * self.training_config["reconstruction_weight"]
-            
-            # PSNR計算
-            with torch.no_grad():
-                mse = torch.mean((generated - batch['post']) ** 2)
-                psnr = 20 * torch.log10(2.0 / torch.sqrt(mse))  # [-1,1]範囲なので最大値は2
-                self.log('psnr', psnr, on_step=True, on_epoch=True, prog_bar=True)
-            
-        # 知覚損失（VGG特徴量の差）の計算
+            losses['margin_loss'] = image_loss * self.training_config["reconstruction_weight"]
+                
+        # 知覚損失
         if self.perception_loss_model is not None:
             _, fake_features = self.perception_loss_model(generated)
             _, target_features = self.perception_loss_model(batch['post'])
             perception_loss = ((fake_features - target_features) ** 2).mean()
             losses['g_perception_loss'] = perception_loss * self.perception_loss_weight
-            
-        # 敵対的損失の計算
+                
+        # 敵対的損失
         if self.discriminator is not None:
-            fake_labels, fake_features = self.discriminator(generated)
-            
-            # 生成画像を本物と判定させるように学習
+            fake_labels, _ = self.discriminator(generated)
             adversarial_loss = self.adversarial_criterion(
                 fake_labels, torch.ones_like(fake_labels)
             )
             losses['g_adversarial_loss'] = adversarial_loss * self.training_config["adversarial_weight"]
-            
-            # 特徴マッチング損失（オプション）
-            if self.training_config.get("use_feature_matching", False):
-                _, real_features = self.discriminator(batch['post'])
-                feature_matching_loss = sum(
-                    torch.mean((f_r - f_f) ** 2)
-                    for f_r, f_f in zip(real_features, fake_features)
-                )
-                losses['g_feature_matching_loss'] = (
-                    feature_matching_loss * self.training_config.get("feature_matching_weight", 0.1)
-                )
-        
-        # 総損失の計算
+                
+        # 総損失
         total_g_loss = sum(losses.values())
         losses['g_total_loss'] = total_g_loss
-        
-        # メトリクスのロギング
-        self._log_metrics(losses, prefix='generator/')
-        
-        # 画像のロギング
-        self._log_images(batch, generated)
             
+        # メトリクスのロギング
+        self._log_metrics(losses)
+            
+        # 定期的な画像の保存
+        if self.global_step % 100 == 0:
+            self.logger.experiment.add_images(
+                'generated_images',
+                (generated + 1) / 2,  # [-1,1] -> [0,1]
+                self.global_step
+            )
+                
         return {'loss': total_g_loss, **losses}
 
     def _discriminator_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """識別器の学習ステップ"""
-        # 生成画像の作成（勾配計算なし）
         with torch.no_grad():
             generated = self.generator(batch['pre'])
         
-        # 本物画像の判定
+        # 真画像の損失
         real_labels, _ = self.discriminator(batch['post'])
         real_loss = self.adversarial_criterion(
             real_labels, torch.ones_like(real_labels)
         )
         
-        # 生成画像の判定
+        # 生成画像の損失
         fake_labels, _ = self.discriminator(generated)
         fake_loss = self.adversarial_criterion(
             fake_labels, torch.zeros_like(fake_labels)
         )
         
-        # 識別器の総損失
+        # 総損失
         d_loss = (real_loss + fake_loss) * 0.5
         
-        # 識別器の損失をログ記録
-        losses = {
+        # 損失のロギング
+        self.log_dict({
             'd_real_loss': real_loss,
             'd_fake_loss': fake_loss,
             'd_total_loss': d_loss
-        }
-        
-        # 識別器の精度計算
-        with torch.no_grad():
-            real_accuracy = (real_labels > 0.5).float().mean()
-            fake_accuracy = (fake_labels < 0.5).float().mean()
-            accuracy = (real_accuracy + fake_accuracy) * 0.5
-            
-            self.log('d_real_accuracy', real_accuracy, on_step=True, on_epoch=True, prog_bar=True)
-            self.log('d_fake_accuracy', fake_accuracy, on_step=True, on_epoch=True, prog_bar=True)
-            self.log('d_accuracy', accuracy, on_step=True, on_epoch=True, prog_bar=True)
-        
-        # メトリクスのロギング
-        self._log_metrics(losses, prefix='discriminator/')
+        }, prog_bar=True)
         
         return {'loss': d_loss}
 
@@ -246,93 +222,68 @@ class StyleTransferModel(pl.LightningModule):
             pin_memory=True
         )
     
-    def _log_metrics(self, losses: Dict[str, torch.Tensor], prefix: str = ""):
+    def _log_metrics(self, losses: Dict[str, torch.Tensor]):
         """メトリクスのロギング"""
-        # 各損失値を個別にログ
-        for name, value in losses.items():
-            self.log(
-                f"{prefix}{name}",
-                value,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=True
-            )
-
-        # 移動平均の計算とログ
-        if not hasattr(self, "loss_history"):
-            self.loss_history = {}
+        # 論文と同じメトリクス名を使用
+        metric_mapping = {
+            'margin_loss': 'g_image_loss',
+            'g_perception_loss': 'g_perception_loss',
+            'g_adversarial_loss': 'g_adversarial_loss',
+            'g_total_loss': 'g_total_loss'
+        }
         
-        window_size = 100
         for name, value in losses.items():
-            if name not in self.loss_history:
-                self.loss_history[name] = []
+            mapped_name = metric_mapping.get(name, name)
+            self.log(mapped_name, value, prog_bar=True)
             
-            self.loss_history[name].append(value.item())
-            if len(self.loss_history[name]) > window_size:
-                self.loss_history[name].pop(0)
-            
-            avg_value = np.mean(self.loss_history[name])
-            self.log(
-                f"{prefix}{name}_ma{window_size}",
-                avg_value,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=True
-            )
-
     def _log_images(self, batch: Dict[str, torch.Tensor], generated: torch.Tensor):
-        """画像のロギング"""
+        """画像のロギング - パッチ画像を含む"""
         if self.global_step % self.training_config.get("image_log_freq", 100) == 0:
-            # 入力画像、生成画像、目標画像を並べて表示
-            vis_images = []
+            # 1. パッチ画像の表示
+            patches_vis = []
             
-            # 入力画像
-            input_images = batch['pre']
-            vis_images.append(input_images)
+            # 入力パッチ
+            input_patches = batch['pre']
+            patches_vis.append(input_patches)
             
-            # 生成画像
-            vis_images.append(generated)
+            # 生成パッチ
+            patches_vis.append(generated)
             
-            # 目標画像
-            target_images = batch['post']
-            vis_images.append(target_images)
+            # 目標パッチ
+            target_patches = batch['post']
+            patches_vis.append(target_patches)
             
-            # 画像を結合
-            vis_images = torch.cat(vis_images, dim=3)  # 横に並べる
+            # パッチ画像を結合してグリッド形式で表示
+            patches_vis = torch.cat(patches_vis, dim=3)  # 横に並べる
+            patches_vis = (patches_vis + 1) / 2  # [-1,1] -> [0,1]
             
-            # [-1,1]から[0,1]に変換
-            vis_images = (vis_images + 1) / 2
-            
-            # グリッド形式で画像を保存
-            grid = vutils.make_grid(
-                vis_images,
-                nrow=1,
+            patches_grid = vutils.make_grid(
+                patches_vis,
+                nrow=4,  # 1行に表示するパッチ数
                 padding=2,
                 normalize=False
             )
             
-            # TensorBoardにログ
+            # TensorBoardにパッチをログ
             self.logger.experiment.add_image(
-                'comparison',
-                grid,
+                'training_patches/input_generated_target',
+                patches_grid,
                 self.global_step
             )
 
-            # 差分マップの生成と保存
-            with torch.no_grad():
-                diff_map = torch.abs(generated - target_images)
-                diff_map = diff_map.mean(dim=1, keepdim=True)  # チャンネル方向の平均
-                diff_map = diff_map / diff_map.max()  # [0,1]に正規化
+            # 2. ランダムサンプリングされたパッチの位置を可視化
+            if 'patch_positions' in batch:
+                # パッチ位置の可視化用の空の画像を作成
+                h, w = batch['pre'].shape[2], batch['pre'].shape[3]
+                vis_positions = torch.zeros((1, 3, h, w), device=self.device)
                 
-                # カラーマップの適用（任意）
-                diff_map = torch.cat([diff_map, torch.zeros_like(diff_map), torch.zeros_like(diff_map)], dim=1)
+                # パッチ位置を赤色でマーク
+                for pos in batch['patch_positions']:
+                    y, x = pos
+                    vis_positions[0, 0, y:y+h, x:x+w] = 1.0  # 赤チャンネル
                 
                 self.logger.experiment.add_image(
-                    'diff_map',
-                    vutils.make_grid(diff_map, nrow=1, padding=2),
+                    'patch_positions',
+                    vis_positions,
                     self.global_step
                 )
