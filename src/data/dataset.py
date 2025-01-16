@@ -7,6 +7,7 @@ from PIL import Image
 from torchvision import transforms
 from typing import Dict, Optional, List, Tuple
 import numpy as np
+from .transforms import RGBConvert, GrayscaleConvert
 
 class StyleTransferDataset(Dataset):
     def __init__(
@@ -16,9 +17,7 @@ class StyleTransferDataset(Dataset):
         dir_mask: str,
         patch_size: int,
         device: str,
-        additional_channels: Optional[Dict[str, str]] = None,
-        transform = None,
-        mask_transform = None
+        additional_channels: Optional[Dict[str, str]] = None
     ):
         super().__init__()
         self.dir_pre = dir_pre
@@ -29,22 +28,16 @@ class StyleTransferDataset(Dataset):
         self.additional_channels = additional_channels or {}
         
         # Setup transforms
-        if transform is None:
-            self.transform = transforms.Compose([
-                transforms.Lambda(lambda x: x if x.mode == 'RGB' else x.convert('RGB')),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            ])
-        else:
-            self.transform = transform
+        self.transform = transforms.Compose([
+            RGBConvert(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
             
-        if mask_transform is None:
-            self.mask_transform = transforms.Compose([
-                transforms.Lambda(lambda x: x if x.mode == 'L' else x.convert('L')),
-                transforms.ToTensor()
-            ])
-        else:
-            self.mask_transform = mask_transform
+        self.mask_transform = transforms.Compose([
+            GrayscaleConvert(),
+            transforms.ToTensor()
+        ])
             
         # Load image paths
         self.image_paths = sorted([f for f in os.listdir(dir_pre) if f.endswith(('.png', '.jpg', '.jpeg'))])
@@ -78,57 +71,48 @@ class StyleTransferDataset(Dataset):
             
             # Load and process mask
             mask = Image.open(os.path.join(self.dir_mask, img_path))
+            mask = mask.point(lambda p: p > 128 and 255)
             mask_tensor = self.mask_transform(mask).to(self.device)
             
             # Calculate valid indices for patches
             mask_tensor[mask_tensor < 0.4] = 0
-            valid_indices = self._get_valid_patch_indices(mask_tensor)
-            self.valid_indices.append(valid_indices)
-            self.valid_indices_left.append(list(range(len(valid_indices))))
-    
-    def _get_valid_patch_indices(self, mask: torch.Tensor) -> torch.Tensor:
-        """Get indices of valid patches from mask"""
-        # Use convolution to find valid patch centers
-        kernel_size = 7
-        padding = kernel_size // 2
-        erosion_weights = torch.ones((1, 1, kernel_size, kernel_size)).to(self.device)
-        
-        mask = F.conv2d(
-            mask.unsqueeze(0),
-            erosion_weights,
-            padding=padding
-        )
-        
-        mask[mask < erosion_weights.numel()] = 0
-        mask /= erosion_weights.numel()
-        
-        return mask.squeeze().nonzero()
-    
-    def _get_patch(self, tensor: torch.Tensor, center: torch.Tensor) -> torch.Tensor:
-        """Extract a patch from tensor centered at given coordinates"""
-        half_size = self.patch_size // 2
-        y, x = center
-        
-        # Calculate patch boundaries
-        top = max(0, y - half_size)
-        bottom = min(tensor.shape[1], y + half_size)
-        left = max(0, x - half_size)
-        right = min(tensor.shape[2], x + half_size)
-        
-        patch = tensor[:, top:bottom, left:right]
-        
-        # Pad if necessary
-        if patch.shape[1:] != (self.patch_size, self.patch_size):
-            pad_top = max(0, half_size - y)
-            pad_bottom = max(0, y + half_size - tensor.shape[1])
-            pad_left = max(0, half_size - x)
-            pad_right = max(0, x + half_size - tensor.shape[2])
             
-            patch = F.pad(
-                patch,
-                (pad_left, pad_right, pad_top, pad_bottom),
-                mode='reflect'
+            # Apply erosion
+            erosion_weights = torch.ones((1, 1, 7, 7)).to(self.device)
+            mask_conv = F.conv2d(
+                mask_tensor.unsqueeze(0),
+                erosion_weights,
+                stride=1,
+                padding=3
             )
+            mask_conv[mask_conv < erosion_weights.numel()] = 0
+            mask_conv /= erosion_weights.numel()
+            
+            # Get valid indices
+            indices = mask_conv.squeeze().nonzero()
+            self.valid_indices.append(indices)
+            self.valid_indices_left.append(list(range(len(indices))))
+            
+    def _cut_patch(self, tensor: torch.Tensor, midpoint: torch.Tensor) -> torch.Tensor:
+        """Extract a patch from tensor centered at given coordinates"""
+        size = self.patch_size
+        y, x = midpoint[0], midpoint[1]
+        
+        half_size = size // 2
+        # Calculate boundaries
+        hn = max(0, y - half_size)
+        hx = min(y + half_size, tensor.size(1) - 1)
+        xn = max(0, x - half_size)
+        xx = min(x + half_size, tensor.size(2) - 1)
+        
+        # Extract patch
+        patch = tensor[:, hn:hx, xn:xx]
+        
+        # If patch size is not correct, create zero tensor and copy patch
+        if patch.size(1) != size or patch.size(2) != size:
+            result = torch.zeros((tensor.size(0), size, size), device=patch.device)
+            result[:, :patch.size(1), :patch.size(2)] = patch
+            patch = result
             
         return patch
 
@@ -139,20 +123,17 @@ class StyleTransferDataset(Dataset):
         if not self.valid_indices_left[img_idx]:
             self.valid_indices_left[img_idx] = list(range(len(self.valid_indices[img_idx])))
         
-        center_idx = np.random.choice(self.valid_indices_left[img_idx])
-        self.valid_indices_left[img_idx].remove(center_idx)
+        center_idx = np.random.randint(0, len(self.valid_indices_left[img_idx]))
+        midpoint = self.valid_indices[img_idx][self.valid_indices_left[img_idx][center_idx]]
+        del self.valid_indices_left[img_idx][center_idx]
         
-        center = self.valid_indices[img_idx][center_idx]
+        # Get random midpoint for adversarial training
+        midpoint_r = self.valid_indices[img_idx][np.random.randint(0, len(self.valid_indices[img_idx]))]
         
         # Get patches
-        pre_patch = self._get_patch(self.images_pre[img_idx], center)
-        post_patch = self._get_patch(self.images_post[img_idx], center)
-        
-        # Get random patch for adversarial training
-        random_center = self.valid_indices[img_idx][
-            np.random.randint(len(self.valid_indices[img_idx]))
-        ]
-        random_patch = self._get_patch(self.images_post[img_idx], random_center)
+        pre_patch = self._cut_patch(self.images_pre[img_idx], midpoint)
+        post_patch = self._cut_patch(self.images_post[img_idx], midpoint)
+        random_patch = self._cut_patch(self.images_post[img_idx], midpoint_r)
         
         return {
             'pre': pre_patch,

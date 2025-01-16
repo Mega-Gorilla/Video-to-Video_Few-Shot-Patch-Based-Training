@@ -18,9 +18,7 @@ class StyleTransferModel(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        
-        # Data config
-        self.data_config = data_config
+        self.automatic_optimization = False  # 手動最適化モードに設定
         
         # Initialize networks
         self.generator = self._build_generator(generator_config)
@@ -48,7 +46,8 @@ class StyleTransferModel(pl.LightningModule):
         # Training config
         self.training_config = training_config
         self.optimizer_config = optimizer_config
-        
+        self.data_config = data_config
+
     def _build_generator(self, config: Dict[str, Any]) -> nn.Module:
         # Import your generator model here
         from src.models.generator import GeneratorJ
@@ -61,39 +60,41 @@ class StyleTransferModel(pl.LightningModule):
     def _build_perception_model(self, config: Dict[str, Any]) -> nn.Module:
         from src.models.perception import PerceptualVGG19
         return PerceptualVGG19(**config["args"])
+
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+        # Get optimizers
+        opt_g, opt_d = self.optimizers()
+
+        # Train Discriminator
+        if self.discriminator is not None:
+            opt_d.zero_grad()
+            d_loss = self._discriminator_step(batch)
+            self.manual_backward(d_loss['loss'])
+            
+            # Manual gradient clipping for discriminator
+            if self.training_config.get("use_gradient_clipping", False):
+                torch.nn.utils.clip_grad_norm_(
+                    self.discriminator.parameters(), 
+                    self.training_config["gradient_clip_val"]
+                )
+                
+            opt_d.step()
+
+        # Train Generator
+        opt_g.zero_grad()
+        g_loss = self._generator_step(batch)
+        self.manual_backward(g_loss['loss'])
         
-    def setup(self, stage: Optional[str] = None):
-        """Data setup"""
-        if stage == "fit" or stage is None:
-            self.train_dataset = StyleTransferDataset(
-                **self.data_config,
-                device=self.device
+        # Manual gradient clipping for generator
+        if self.training_config.get("use_gradient_clipping", False):
+            torch.nn.utils.clip_grad_norm_(
+                self.generator.parameters(), 
+                self.training_config["gradient_clip_val"]
             )
+            
+        opt_g.step()
 
-    def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.training_config["batch_size"],
-            num_workers=self.training_config["num_workers"],
-            shuffle=True,
-            pin_memory=True
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.generator(x)
-
-    def training_step(
-        self,
-        batch: Dict[str, torch.Tensor],
-        batch_idx: int,
-        optimizer_idx: int = 0
-    ) -> Dict[str, torch.Tensor]:
-        # Generator training
-        if optimizer_idx == 0:
-            return self._generator_step(batch)
-        # Discriminator training
-        elif optimizer_idx == 1 and self.discriminator is not None:
-            return self._discriminator_step(batch)
+        return g_loss
 
     def _generator_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         generated = self.generator(batch['pre'])
@@ -128,15 +129,15 @@ class StyleTransferModel(pl.LightningModule):
         # Log metrics
         self.log_dict(losses, prog_bar=True)
         
-        if batch_idx % 100 == 0:
+        if self.global_step % 100 == 0:
             # Log images
             self.logger.experiment.add_images(
                 'generated_images',
-                (generated + 1) / 2,  # Convert from [-1, 1] to [0, 1]
+                (generated + 1) / 2,
                 self.global_step
             )
             
-        return {'loss': total_g_loss}
+        return {'loss': total_g_loss, **losses}
 
     def _discriminator_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # Generate fake images
@@ -183,3 +184,20 @@ class StyleTransferModel(pl.LightningModule):
             optimizers.append(opt_d)
             
         return optimizers
+
+    def setup(self, stage: Optional[str] = None):
+        """Data setup"""
+        if stage == "fit" or stage is None:
+            self.train_dataset = StyleTransferDataset(
+                **self.data_config,
+                device=self.device
+            )
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.training_config["batch_size"],
+            num_workers=self.training_config["num_workers"],
+            shuffle=True,
+            pin_memory=True
+        )

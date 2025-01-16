@@ -82,7 +82,7 @@ def train(cfg: DictConfig) -> None:
     # Create callbacks
     callbacks = create_callbacks(cfg)
     
-    # Initialize trainer
+    # Initialize trainer (without gradient_clip_val)
     trainer = pl.Trainer(
         logger=logger,
         callbacks=callbacks,
@@ -91,7 +91,6 @@ def train(cfg: DictConfig) -> None:
         devices=cfg.training.devices,
         precision=cfg.training.precision,
         accumulate_grad_batches=cfg.training.accumulate_grad_batches,
-        gradient_clip_val=cfg.training.gradient_clip_val,
         deterministic=cfg.training.deterministic,
         log_every_n_steps=cfg.training.log_every_n_steps,
         enable_progress_bar=True,

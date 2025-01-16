@@ -1,11 +1,9 @@
 # models/generator.py
 import torch
 import torch.nn as nn
-from typing import List, Optional, Union
-from dataclasses import dataclass
 from torch import Tensor
+from typing import List, Optional
 
-@dataclass
 class UpsamplingLayer(nn.Module):
     """Upsampling layer with optional convolution"""
     def __init__(self, channels: int):
@@ -34,7 +32,7 @@ class ResNetBlock(nn.Module):
             
         # First convolution block
         layers = [
-            nn.ReLU(True),
+            nn.ReLU(inplace=False),  # inplace=Falseに変更
             nn.Conv2d(channels, channels, 3, 1, 1, bias=use_bias),
         ]
         if norm:
@@ -42,7 +40,7 @@ class ResNetBlock(nn.Module):
             
         # Second convolution block
         layers.extend([
-            nn.ReLU(True),
+            nn.ReLU(inplace=False),  # inplace=Falseに変更
             nn.Conv2d(channels, channels, 3, 1, 1, bias=use_bias)
         ])
         if norm:
@@ -81,17 +79,17 @@ class GeneratorJ(nn.Module):
         # Initial convolution
         self.initial_conv = self._make_conv_block(
             input_channels, filters[0], 7, 1, 3,
-            use_bias, norm, nn.LeakyReLU(0.2, True)
+            use_bias, norm, nn.LeakyReLU(0.2, inplace=False)  # inplace=Falseに変更
         )
         
         # Downsampling layers
         self.downsample1 = self._make_conv_block(
             filters[0], filters[1], 3, 2, 1,
-            use_bias, norm, nn.LeakyReLU(0.2, True)
+            use_bias, norm, nn.LeakyReLU(0.2, inplace=False)  # inplace=Falseに変更
         )
         self.downsample2 = self._make_conv_block(
             filters[1], filters[2], 3, 2, 1,
-            use_bias, norm, nn.LeakyReLU(0.2, True)
+            use_bias, norm, nn.LeakyReLU(0.2, inplace=False)  # inplace=Falseに変更
         )
         
         # ResNet blocks
@@ -103,27 +101,27 @@ class GeneratorJ(nn.Module):
         # Upsampling layers
         self.upsample2 = self._make_upconv_block(
             filters[2] + filters[2], filters[4], 4, 2, 1,
-            use_bias, norm, nn.ReLU(True)
+            use_bias, norm, nn.ReLU(inplace=False)  # inplace=Falseに変更
         )
         self.upsample1 = self._make_upconv_block(
             filters[4] + filters[1], filters[4], 4, 2, 1,
-            use_bias, norm, nn.ReLU(True)
+            use_bias, norm, nn.ReLU(inplace=False)  # inplace=Falseに変更
         )
         
         # Final convolution layers
         conv11_channels = filters[0] + filters[4] + input_channels
         self.conv11 = nn.Sequential(
             nn.Conv2d(conv11_channels, filters[5], 7, 1, 3, bias=use_bias),
-            nn.ReLU(True)
+            nn.ReLU(inplace=False)  # inplace=Falseに変更
         )
         
         if self.append_smoothers:
             self.smoothers = nn.Sequential(
                 nn.Conv2d(filters[5], filters[5], 3, padding=1, bias=use_bias),
-                nn.ReLU(True),
+                nn.ReLU(inplace=False),  # inplace=Falseに変更
                 nn.BatchNorm2d(filters[5]),
                 nn.Conv2d(filters[5], filters[5], 3, padding=1, bias=use_bias),
-                nn.ReLU(True)
+                nn.ReLU(inplace=False)  # inplace=Falseに変更
             )
             
         # Output layer
