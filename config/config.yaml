@@ -1,16 +1,19 @@
 # config/config.yaml
 defaults:
-  - _self_
-  - model: default
-  - optimizer: default
-  - training: default
-  - data: default
-  - override hydra/job_logging: default
-  - override hydra/hydra_logging: default
+  - _self_              # 現在のconfigファイルを含める
+  - model: default      # モデル設定を読み込み
+  - optimizer: default  # オプティマイザー設定を読み込み
+  - training: default   # 学習設定を読み込み
+  - data: default       # データ設定を読み込み
+  - override hydra/job_logging: default    # ログ出力の設定を上書き
+  - override hydra/hydra_logging: default  # hydraのログ設定を上書き
 
+# 実行時の出力ディレクトリ設定
 hydra:
   run:
+    # 出力ディレクトリのパス: ${training.output_dir}/年-月-日/時-分-秒
     dir: ${training.output_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
+    # マルチランの出力ディレクトリ
     dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.override_dirname}

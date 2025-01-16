@@ -2,5 +2,5 @@
 dir_pre: "TEST_DATA/Zuzka2_train/input_filtered"     # 入力画像のディレクトリ
 dir_post: "TEST_DATA/Zuzka2_train/output"   # スタイル変換後の教師画像のディレクトリ
 dir_mask: "TEST_DATA/Zuzka2_train/mask"     # マスク画像のディレクトリ
-patch_size: 32
+patch_size: 32                              # パッチサイズ
 additional_channels: {}  # オプションの追加入力チャンネル

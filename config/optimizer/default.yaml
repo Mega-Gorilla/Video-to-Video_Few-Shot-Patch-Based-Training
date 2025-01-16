@@ -1,10 +1,10 @@
 # config/optimizer/default.yaml
-generator:
-  lr: 0.0004
-  betas: [0.9, 0.999]
-  weight_decay: 0.00001
-
-discriminator:
+generator:  # 生成器のオプティマイザー設定
+  lr: 0.0004                # 学習率
+  betas: [0.9, 0.999]       # Adamのβパラメータ
+  weight_decay: 0.00001     # 重み減衰率
+  
+discriminator:  # 識別器のオプティマイザー設定
   lr: 0.0004
   betas: [0.9, 0.999]
   weight_decay: 0.00001

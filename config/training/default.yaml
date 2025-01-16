@@ -1,35 +1,35 @@
 # config/training/default.yaml
 # Training settings
-output_dir: "outputs"
-max_epochs: 500
-batch_size: 40
-num_workers: 4
+output_dir: "outputs"  # 出力ベースディレクトリ
+max_epochs: 500       # 最大エポック数
+batch_size: 40        # バッチサイズ
+num_workers: 4        # データローダーの並列数
 
-# Optimization
-reconstruction_weight: 4.0
-adversarial_weight: 0.5
-use_image_loss: true
-reconstruction_criterion: L1Loss
-adversarial_criterion: MSELoss
-learning_rate: 0.0004
+# 損失関数の重み設定
+reconstruction_weight: 4.0  # 再構成損失の重み
+adversarial_weight: 0.5    # 敵対的損失の重み
+use_image_loss: true       # 画像損失を使用するか
+reconstruction_criterion: L1Loss  # 再構成損失の種類（L1損失）
+adversarial_criterion: MSELoss  # 敵対的損失の種類（MSE損失）
+learning_rate: 0.0004           # 基本学習率
 
-# Gradient clipping
-use_gradient_clipping: true
-gradient_clip_val: 0.5
+# 勾配クリッピングの設定
+use_gradient_clipping: true     # 勾配クリッピングを使用するか
+gradient_clip_val: 0.5          # クリッピングの閾値
 
-# Early stopping
-early_stopping: true
-early_stopping_patience: 20
+# Early Stopping設定
+early_stopping: true           # Early Stoppingを使用するか
+early_stopping_patience: 20    # 改善が見られないまま待機するエポック数
 
-# Hardware settings
-accelerator: "auto"  # "cpu", "gpu", "auto"
-devices: 1
-precision: 32       # 16, 32, or "bf16"
+# ハードウェア設定
+accelerator: "auto"  # 使用するアクセラレータ ("cpu", "gpu", "auto")
+devices: 1          # 使用するデバイス数
+precision: 32       # 演算精度（16, 32, または "bf16"）
 
-# Training optimizations
-accumulate_grad_batches: 1
-deterministic: false
-log_every_n_steps: 10
+# 学習の最適化設定
+accumulate_grad_batches: 1    # 勾配を蓄積するバッチ数
+deterministic: false          # 決定論的な動作にするか
+log_every_n_steps: 10        # ログを出力するステップ間隔
 
-# Logging
-save_interval: 100
+# ログ
+save_interval: 100           # モデルを保存する間隔
