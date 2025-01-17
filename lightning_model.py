@@ -107,7 +107,14 @@ class StyleTransferModel(pl.LightningModule):
                 self.training_config["gradient_clip_val"]
             )
             
-        opt_g.step()  # パラメータの更新
+        opt_g.step()
+
+        # batch_idxを使用してログのタイミングを制御
+        if batch_idx % self.training_config.get("image_log_freq", 100) == 0:
+            # 生成画像を取得
+            with torch.no_grad():
+                generated = self.generator(batch['pre'])
+            self._log_images(batch, generated, batch_idx)
 
         return g_loss
 
@@ -144,14 +151,6 @@ class StyleTransferModel(pl.LightningModule):
             
         # メトリクスのロギング
         self._log_metrics(losses)
-            
-        # 定期的な画像の保存
-        if self.global_step % 100 == 0:
-            self.logger.experiment.add_images(
-                'generated_images',
-                (generated + 1) / 2,  # [-1,1] -> [0,1]
-                self.global_step
-            )
                 
         return {'loss': total_g_loss, **losses}
 
@@ -236,54 +235,81 @@ class StyleTransferModel(pl.LightningModule):
             mapped_name = metric_mapping.get(name, name)
             self.log(mapped_name, value, prog_bar=True)
             
-    def _log_images(self, batch: Dict[str, torch.Tensor], generated: torch.Tensor):
-        """画像のロギング - パッチ画像を含む"""
-        if self.global_step % self.training_config.get("image_log_freq", 100) == 0:
-            # 1. パッチ画像の表示
-            patches_vis = []
-            
-            # 入力パッチ
-            input_patches = batch['pre']
-            patches_vis.append(input_patches)
-            
-            # 生成パッチ
-            patches_vis.append(generated)
-            
-            # 目標パッチ
-            target_patches = batch['post']
-            patches_vis.append(target_patches)
-            
-            # パッチ画像を結合してグリッド形式で表示
-            patches_vis = torch.cat(patches_vis, dim=3)  # 横に並べる
-            patches_vis = (patches_vis + 1) / 2  # [-1,1] -> [0,1]
-            
-            patches_grid = vutils.make_grid(
-                patches_vis,
-                nrow=4,  # 1行に表示するパッチ数
+    def _log_images(self, batch: Dict[str, torch.Tensor], generated: torch.Tensor, batch_idx: int):
+        """画像のロギング - 入力、生成、目標画像を並べて表示し、パッチ位置も可視化"""
+        log_freq = self.training_config.get("image_log_freq", 100)
+        if batch_idx % log_freq == 0:
+            # 画像を[-1, 1]から[0, 1]の範囲に正規化
+            def normalize_tensor(x):
+                # バッチの最初の画像だけを使用
+                if len(x.shape) == 4:  # (batch, channel, height, width)
+                    x = x[0:1]  # 最初の1枚を保持 (1, channel, height, width)
+                return (x.clamp(-1, 1) + 1) / 2
+
+            def draw_patches_on_image(image_tensor, patch_positions, patch_size, color=(1, 0, 0)):
+                """画像にパッチ位置を描画"""
+                # バッチの最初の画像だけを使用
+                if len(image_tensor.shape) == 4:
+                    image_tensor = image_tensor[0:1]
+                image = normalize_tensor(image_tensor.clone())
+                
+                if patch_positions:
+                    pos = patch_positions[0]  # 最初のパッチ位置のみ使用
+                    y, x = pos
+                    half_size = patch_size // 2
+                    # パッチの境界を描画（赤いボックス）
+                    y_min = max(0, y - half_size)
+                    y_max = min(image.shape[2] - 1, y + half_size)
+                    x_min = max(0, x - half_size)
+                    x_max = min(image.shape[3] - 1, x + half_size)
+                    
+                    # 横線を描画
+                    if y_min >= 0 and y_min < image.shape[2]:
+                        image[:, :, y_min, x_min:x_max+1] = torch.tensor(color).view(1, 3, 1)
+                    if y_max >= 0 and y_max < image.shape[2]:
+                        image[:, :, y_max, x_min:x_max+1] = torch.tensor(color).view(1, 3, 1)
+                    
+                    # 縦線を描画
+                    if x_min >= 0 and x_min < image.shape[3]:
+                        image[:, :, y_min:y_max+1, x_min] = torch.tensor(color).view(1, 3, 1)
+                    if x_max >= 0 and x_max < image.shape[3]:
+                        image[:, :, y_min:y_max+1, x_max] = torch.tensor(color).view(1, 3, 1)
+                        
+                return image
+
+            # パッチ位置情報の取得
+            patch_positions = batch.get('patch_positions', [])
+            patch_size = getattr(self, 'patch_size', 64)  # デフォルトのパッチサイズ
+
+            # 各画像の準備
+            input_image = normalize_tensor(batch['pre'])
+            input_with_patches = draw_patches_on_image(batch['pre'], patch_positions, patch_size)
+            generated_image = normalize_tensor(generated)
+            target_image = normalize_tensor(batch['post'])
+
+            # グリッド表示用に画像を結合
+            combined_images = torch.cat([
+                input_with_patches,  # パッチ位置表示付きの入力
+                generated_image,     # 生成画像
+                target_image        # 目標画像
+            ], dim=3)
+
+            # グリッド作成
+            grid = vutils.make_grid(
+                combined_images,
+                nrow=1,            # 1行に全ての画像を表示
                 padding=2,
-                normalize=False
-            )
-            
-            # TensorBoardにパッチをログ
-            self.logger.experiment.add_image(
-                'training_patches/input_generated_target',
-                patches_grid,
-                self.global_step
+                normalize=False    # 既に正規化済み
             )
 
-            # 2. ランダムサンプリングされたパッチの位置を可視化
-            if 'patch_positions' in batch:
-                # パッチ位置の可視化用の空の画像を作成
-                h, w = batch['pre'].shape[2], batch['pre'].shape[3]
-                vis_positions = torch.zeros((1, 3, h, w), device=self.device)
-                
-                # パッチ位置を赤色でマーク
-                for pos in batch['patch_positions']:
-                    y, x = pos
-                    vis_positions[0, 0, y:y+h, x:x+w] = 1.0  # 赤チャンネル
-                
-                self.logger.experiment.add_image(
-                    'patch_positions',
-                    vis_positions,
-                    self.global_step
-                )
+            # TensorBoardへのログ記録
+            step = self.current_epoch * len(self.trainer.train_dataloader) + batch_idx
+
+            # 個別の画像をログ
+            self.logger.experiment.add_image('training/input', input_image[0], step)
+            self.logger.experiment.add_image('training/input_with_patches', input_with_patches[0], step)
+            self.logger.experiment.add_image('training/generated', generated_image[0], step)
+            self.logger.experiment.add_image('training/target', target_image[0], step)
+
+            # 比較グリッドをログ
+            self.logger.experiment.add_image('training/comparison', grid, step)
