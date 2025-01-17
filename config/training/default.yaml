@@ -32,4 +32,5 @@ deterministic: false          # 決定論的な動作にするか
 log_every_n_steps: 10        # ログを出力するステップ間隔
 
 # ログ
+image_log_freq: 100
 save_interval: 100           # モデルを保存する間隔
