@@ -19,7 +19,7 @@ gradient_clip_val: 0.5          # クリッピングの閾値
 
 # Early Stopping設定
 early_stopping: true           # Early Stoppingを使用するか
-early_stopping_patience: 20    # 改善が見られないまま待機するエポック数
+early_stopping_patience: 5    # 改善が見られないまま待機するエポック数
 
 # ハードウェア設定
 accelerator: "auto"  # 使用するアクセラレータ ("cpu", "gpu", "auto")
