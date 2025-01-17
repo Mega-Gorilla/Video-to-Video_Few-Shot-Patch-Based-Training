@@ -8,6 +8,7 @@ from torchvision import transforms
 from typing import Dict, Optional, List, Tuple
 import numpy as np
 from .transforms import RGBConvert, GrayscaleConvert
+import platform
 
 class StyleTransferDataset(Dataset):
     def __init__(
@@ -24,8 +25,10 @@ class StyleTransferDataset(Dataset):
         self.dir_post = dir_post
         self.dir_mask = dir_mask
         self.patch_size = patch_size
-        self.device = device
         self.additional_channels = additional_channels or {}
+
+        self.is_windows = platform.system() == 'Windows'
+        self.device = device if self.is_windows else 'cpu'  # Windowsの場合は指定されたdevice、それ以外はCPU
         
         # 画像変換のパイプラインを設定
         self.transform = transforms.Compose([
