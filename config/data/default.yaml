@@ -1,7 +1,7 @@
 # config/data/default.yaml
-dir_pre: "TEST_DATA/Zuzka2_train/input_filtered"     # 入力画像のディレクトリ
-dir_post: "TEST_DATA/Zuzka2_train/output"   # スタイル変換後の教師画像のディレクトリ
-dir_mask: "TEST_DATA/Zuzka2_train/mask"     # マスク画像のディレクトリ
+dir_pre: "test_dataset/PlatinumChan_x0.5_train/input"     # 入力画像のディレクトリ
+dir_post: "test_dataset/PlatinumChan_x0.5_train/mask"   # スタイル変換後の教師画像のディレクトリ
+dir_mask: "test_dataset/PlatinumChan_x0.5_train/output"     # マスク画像のディレクトリ
 patch_size: 40                              # パッチサイズ
 additional_channels: {}  # オプションの追加入力チャンネル
 augmentation_factor: 1 # データ拡張
