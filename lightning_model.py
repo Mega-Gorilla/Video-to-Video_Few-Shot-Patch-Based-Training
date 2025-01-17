@@ -236,80 +236,52 @@ class StyleTransferModel(pl.LightningModule):
             self.log(mapped_name, value, prog_bar=True)
             
     def _log_images(self, batch: Dict[str, torch.Tensor], generated: torch.Tensor, batch_idx: int):
-        """画像のロギング - 入力、生成、目標画像を並べて表示し、パッチ位置も可視化"""
+        """画像のロギング - 複数の入力、生成、目標画像を並べて表示"""
         log_freq = self.training_config.get("image_log_freq", 100)
         if batch_idx % log_freq == 0:
-            # 画像を[-1, 1]から[0, 1]の範囲に正規化
-            def normalize_tensor(x):
-                # バッチの最初の画像だけを使用
-                if len(x.shape) == 4:  # (batch, channel, height, width)
-                    x = x[0:1]  # 最初の1枚を保持 (1, channel, height, width)
+            # バッチから表示する画像数を指定
+            num_images_to_show = min(8, batch['pre'].size(0))  # バッチサイズと4の小さい方
+            
+            def normalize_tensor(x, start_idx=0, num_images=num_images_to_show):
+                """テンソルを[0, 1]の範囲に正規化し、指定した数の画像を抽出"""
+                x = x[start_idx:start_idx + num_images]
                 return (x.clamp(-1, 1) + 1) / 2
 
-            def draw_patches_on_image(image_tensor, patch_positions, patch_size, color=(1, 0, 0)):
-                """画像にパッチ位置を描画"""
-                # バッチの最初の画像だけを使用
-                if len(image_tensor.shape) == 4:
-                    image_tensor = image_tensor[0:1]
-                image = normalize_tensor(image_tensor.clone())
-                
-                if patch_positions:
-                    pos = patch_positions[0]  # 最初のパッチ位置のみ使用
-                    y, x = pos
-                    half_size = patch_size // 2
-                    # パッチの境界を描画（赤いボックス）
-                    y_min = max(0, y - half_size)
-                    y_max = min(image.shape[2] - 1, y + half_size)
-                    x_min = max(0, x - half_size)
-                    x_max = min(image.shape[3] - 1, x + half_size)
-                    
-                    # 横線を描画
-                    if y_min >= 0 and y_min < image.shape[2]:
-                        image[:, :, y_min, x_min:x_max+1] = torch.tensor(color).view(1, 3, 1)
-                    if y_max >= 0 and y_max < image.shape[2]:
-                        image[:, :, y_max, x_min:x_max+1] = torch.tensor(color).view(1, 3, 1)
-                    
-                    # 縦線を描画
-                    if x_min >= 0 and x_min < image.shape[3]:
-                        image[:, :, y_min:y_max+1, x_min] = torch.tensor(color).view(1, 3, 1)
-                    if x_max >= 0 and x_max < image.shape[3]:
-                        image[:, :, y_min:y_max+1, x_max] = torch.tensor(color).view(1, 3, 1)
-                        
-                return image
+            # 各画像セットの準備
+            input_images = normalize_tensor(batch['pre'])
+            generated_images = normalize_tensor(generated)
+            target_images = normalize_tensor(batch['post'])
 
-            # パッチ位置情報の取得
-            patch_positions = batch.get('patch_positions', [])
-            patch_size = getattr(self, 'patch_size', 64)  # デフォルトのパッチサイズ
+            # 各画像セットをグリッドとして結合
+            # 1行に1セットの画像（入力、生成、目標）を表示
+            for img_idx in range(num_images_to_show):
+                combined_row = torch.cat([
+                    input_images[img_idx:img_idx+1],
+                    generated_images[img_idx:img_idx+1],
+                    target_images[img_idx:img_idx+1]
+                ], dim=3)  # 水平方向に結合
 
-            # 各画像の準備
-            input_image = normalize_tensor(batch['pre'])
-            input_with_patches = draw_patches_on_image(batch['pre'], patch_positions, patch_size)
-            generated_image = normalize_tensor(generated)
-            target_image = normalize_tensor(batch['post'])
+                # 最初の行の場合は新しいテンソルを作成、それ以外は既存のテンソルに追加
+                if img_idx == 0:
+                    combined_images = combined_row
+                else:
+                    combined_images = torch.cat([combined_images, combined_row], dim=2)  # 垂直方向に結合
 
-            # グリッド表示用に画像を結合
-            combined_images = torch.cat([
-                input_with_patches,  # パッチ位置表示付きの入力
-                generated_image,     # 生成画像
-                target_image        # 目標画像
-            ], dim=3)
-
-            # グリッド作成
+            # グリッド作成（nrowは画像セット数）
             grid = vutils.make_grid(
                 combined_images,
-                nrow=1,            # 1行に全ての画像を表示
+                nrow=1,  # 1行に1セットの画像を表示
                 padding=2,
-                normalize=False    # 既に正規化済み
+                normalize=False
             )
 
             # TensorBoardへのログ記録
             step = self.current_epoch * len(self.trainer.train_dataloader) + batch_idx
 
-            # 個別の画像をログ
-            self.logger.experiment.add_image('training/input', input_image[0], step)
-            self.logger.experiment.add_image('training/input_with_patches', input_with_patches[0], step)
-            self.logger.experiment.add_image('training/generated', generated_image[0], step)
-            self.logger.experiment.add_image('training/target', target_image[0], step)
+            # グリッド全体をログ
+            self.logger.experiment.add_image('training/comparison_grid', grid, step)
 
-            # 比較グリッドをログ
-            self.logger.experiment.add_image('training/comparison', grid, step)
+            # 個別の画像もログ（最初の画像セットのみ）
+            self.logger.experiment.add_image('training/input', input_images[0], step)
+            self.logger.experiment.add_image('training/generated', generated_images[0], step)
+            self.logger.experiment.add_image('training/target', target_images[0], step)
