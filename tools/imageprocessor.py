@@ -4,7 +4,7 @@ from PIL import Image
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                             QSpinBox, QMessageBox, QComboBox, QDoubleSpinBox,
-                            QStackedWidget)
+                            QStackedWidget, QRadioButton, QButtonGroup)
 from PyQt6.QtCore import Qt
 
 class ImageProcessor:
@@ -12,7 +12,7 @@ class ImageProcessor:
         self.dataset_dir = ""
         self.output_root_dir = ""
         
-    def process_images(self, size_mode, size_value):
+    def process_images(self, size_mode, size_value, bg_color):
         """画像の処理を実行する"""
         if not all([self.dataset_dir, self.output_root_dir]):
             raise ValueError("ディレクトリが設定されていません")
@@ -42,20 +42,26 @@ class ImageProcessor:
             else:  # scale
                 target_width = int(png_img.width * size_value)
                 target_height = int(png_img.height * size_value)
-                
-            # PNG画像をリサイズして保存
-            png_resized = png_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
-            png_output_path = os.path.join(new_input_dir, png_file)
-            png_resized.save(png_output_path, 'PNG')
-            
-            # アルファチャンネルからマスクを作成
+
+            # アルファチャンネルの処理
             if png_img.mode == 'RGBA':
+                # マスク画像の作成
                 alpha = png_img.split()[3]
                 mask_resized = alpha.resize((target_width, target_height), Image.Resampling.LANCZOS)
-                
                 mask_filename = os.path.splitext(png_file)[0] + '.jpg'
                 mask_path = os.path.join(new_mask_dir, mask_filename)
                 mask_resized.convert('RGB').save(mask_path, 'JPEG', quality=95)
+                
+                # 背景色の設定（白または黒）
+                bg_color_rgb = (255, 255, 255) if bg_color == 'white' else (0, 0, 0)
+                bg = Image.new('RGB', png_img.size, bg_color_rgb)
+                bg.paste(png_img, mask=png_img.split()[3])  # アルファチャンネルをマスクとして使用
+                png_img = bg
+            
+            # リサイズして保存
+            png_resized = png_img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            png_output_path = os.path.join(new_input_dir, os.path.splitext(png_file)[0] + '.jpg')
+            png_resized.convert('RGB').save(png_output_path, 'JPEG', quality=95)
             
             # 対応する出力画像を処理
             jpg_filename = os.path.splitext(png_file)[0] + '.png'
@@ -140,6 +146,23 @@ class MainWindow(QMainWindow):
         self.size_stack.addWidget(width_widget)
         self.size_stack.addWidget(scale_widget)
         layout.addWidget(self.size_stack)
+
+        # 背景色選択
+        bg_color_layout = QHBoxLayout()
+        bg_color_layout.addWidget(QLabel('背景色:'))
+        self.bg_color_group = QButtonGroup()
+        
+        self.white_radio = QRadioButton('白')
+        self.black_radio = QRadioButton('黒')
+        self.white_radio.setChecked(True)
+        
+        self.bg_color_group.addButton(self.white_radio)
+        self.bg_color_group.addButton(self.black_radio)
+        
+        bg_color_layout.addWidget(self.white_radio)
+        bg_color_layout.addWidget(self.black_radio)
+        bg_color_layout.addStretch()
+        layout.addLayout(bg_color_layout)
         
         # 実行ボタン
         process_btn = QPushButton('処理実行')
@@ -173,8 +196,11 @@ class MainWindow(QMainWindow):
             # サイズモードと値を取得
             size_mode = "width" if self.size_mode_combo.currentIndex() == 0 else "scale"
             size_value = self.width_spin.value() if size_mode == "width" else self.scale_spin.value()
+            
+            # 背景色を取得
+            bg_color = 'white' if self.white_radio.isChecked() else 'black'
                 
-            self.processor.process_images(size_mode, size_value)
+            self.processor.process_images(size_mode, size_value, bg_color)
             QMessageBox.information(self, '完了', '画像処理が完了しました。')
         except Exception as e:
             QMessageBox.critical(self, 'エラー', f'処理中にエラーが発生しました: {str(e)}')
