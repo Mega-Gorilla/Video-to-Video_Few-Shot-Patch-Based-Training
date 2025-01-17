@@ -18,6 +18,7 @@ class StyleTransferDataset(Dataset):
         dir_mask: str,         # マスク画像のディレクトリ
         patch_size: int,       # 抽出するパッチのサイズ
         device: str,           # 使用するデバイス（CPU/GPU）
+        augmentation_factor: int = 1,  # データ拡張倍数
         additional_channels: Optional[Dict[str, str]] = None  # 追加の入力チャネル
     ):
         super().__init__()
@@ -26,6 +27,7 @@ class StyleTransferDataset(Dataset):
         self.dir_mask = dir_mask
         self.patch_size = patch_size
         self.additional_channels = additional_channels or {}
+        self.augmentation_factor = max(1, augmentation_factor)  # 最小値を1に制限
 
         self.is_windows = platform.system() == 'Windows'
         self.device = device if self.is_windows else 'cpu'  # Windowsの場合は指定されたdevice、それ以外はCPU
@@ -138,25 +140,33 @@ class StyleTransferDataset(Dataset):
         # ランダムに中心点を選択し、使用済みリストから削除
         center_idx = np.random.randint(0, len(self.valid_indices_left[img_idx]))
         midpoint = self.valid_indices[img_idx][self.valid_indices_left[img_idx][center_idx]]
-
+        
         # パッチ位置を記録
         self.last_patch_positions.append(midpoint.tolist())
         
-        # ランダムなmidpointのパッチ位置も記録
-        midpoint_r = self.valid_indices[img_idx][np.random.randint(0, len(self.valid_indices[img_idx]))]
-        self.last_patch_positions.append(midpoint_r.tolist())
+        # 拡張倍数が1より大きい場合のみ追加のランダムパッチを生成
+        if self.augmentation_factor > 1:
+            midpoint_r = self.valid_indices[img_idx][np.random.randint(0, len(self.valid_indices[img_idx]))]
+            self.last_patch_positions.append(midpoint_r.tolist())
+            random_patch = self._cut_patch(self.images_post[img_idx], midpoint_r)
+        else:
+            random_patch = None  # 拡張なしの場合はNone
         
         # パッチの切り出し
         pre_patch = self._cut_patch(self.images_pre[img_idx], midpoint)
         post_patch = self._cut_patch(self.images_post[img_idx], midpoint)
-        random_patch = self._cut_patch(self.images_post[img_idx], midpoint_r)
         
-        return {
+        result = {
             'pre': pre_patch,
             'post': post_patch,
-            'already': random_patch
         }
+        
+        # 拡張倍数が1より大きい場合のみ追加のパッチを含める
+        if random_patch is not None:
+            result['already'] = random_patch
+            
+        return result
 
     def __len__(self) -> int:
-        """データセットの長さを返す（有効なパッチ数 × 5）"""
-        return sum(len(indices) for indices in self.valid_indices) * 5  # より多くの学習反復のため5倍に
+        """データセットの長さを返す（有効なパッチ数 × 拡張倍数）"""
+        return sum(len(indices) for indices in self.valid_indices) * self.augmentation_factor
