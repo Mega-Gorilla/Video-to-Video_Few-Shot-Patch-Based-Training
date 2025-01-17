@@ -4,3 +4,4 @@ pytorch-lightning
 omegaconf
 tensorboard
 netifaces
+PyQt6
