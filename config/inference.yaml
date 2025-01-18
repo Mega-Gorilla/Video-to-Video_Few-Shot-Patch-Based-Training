@@ -1,0 +1,36 @@
+# 基本設定の継承
+defaults:
+  - model: default            # モデル設定
+  - training: default        # トレーニング設定
+  - optimizer: default       # オプティマイザー設定
+  - override hydra/hydra_logging: colorlog
+  - override hydra/job_logging: colorlog
+
+# Hydra設定
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+# パスの設定
+paths:
+  checkpoint: "outputs/checkpoints/last.ckpt"
+  input_dir: "test_dataset/PlatinumChan_x1_gen/input"
+  mask_dir: "test_dataset/PlatinumChan_x1_gen/mask"
+  output_dir: "test_dataset/PlatinumChan_x1_gen/output"
+  
+# 推論の設定
+inference:
+  use_gpu: true
+  save_format: "png"
+  batch_size: 4 #任意設定可能
+  stride: 1 # パッチのストライド（オーバーラップの制御）
+
+# データ設定
+data:
+  dir_pre: ${paths.input_dir}    
+  dir_mask: ${paths.mask_dir}    
+  dir_post: null                 
+  patch_size: 80                 
+  additional_channels: {}
+  augmentation_factor: 1

@@ -1,8 +1,8 @@
 # config/training/default.yaml
 # Training settings
 output_dir: "outputs"  # 出力ベースディレクトリ
-max_epochs: 500       # 最大エポック数
-batch_size: 40        # 1回の学習ステップで処理する画像パッチの数
+max_epochs: 50       # 最大エポック数
+batch_size: 80        # 1回の学習ステップで処理する画像パッチの数
 num_workers: 5        # データローダーの並列数
 
 # 損失関数の重み設定
@@ -19,7 +19,7 @@ gradient_clip_val: 0.5          # クリッピングの閾値
 
 # Early Stopping設定
 early_stopping: true           # Early Stoppingを使用するか
-early_stopping_patience: 5    # 改善が見られないまま待機するエポック数
+early_stopping_patience: 2    # 改善が見られないまま待機するエポック数
 
 # ハードウェア設定
 accelerator: "auto"  # 使用するアクセラレータ ("cpu", "gpu", "auto")
