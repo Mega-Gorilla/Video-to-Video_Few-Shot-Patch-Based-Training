@@ -1,0 +1,32 @@
+defaults:
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+dataset:
+  input_dir: "${oc.env:PROJECT_ROOT}/test_dataset/platinum_chan_train_sorce"  # デフォルトの入力ディレクトリ
+  output_dir: "${oc.env:PROJECT_ROOT}/test_dataset/PlatinumChan_x1_train"  # デフォルトの出力ディレクトリ
+
+processing:
+  size:
+    mode: "scale"  # "width" or "scale"
+    value: 1  # widthの場合はピクセル数、scaleの場合は倍率
+  background_color:
+    r: 0
+    g: 0
+    b: 0
+
+gaussian:
+  enabled: true
+  grid_size: 22
+  blur:
+    min_sigma: 0.1  # ガウス分布の最小σ値
+    max_sigma: 0.5  # ガウス分布の最大σ値
+  opacity:
+    min: 0.5  # 不透明度の最小値
+    max: 1.0  # 不透明度の最大値
+
+hydra:
+  run:
+    dir: .  # 現在のディレクトリで実行
+  output_subdir: null  # hydra出力ディレクトリを作成しない
