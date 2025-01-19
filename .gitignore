@@ -5,3 +5,4 @@
 /TEST_DATA
 test_dataset/*_gen*
 test_dataset/*test*
+*.log
