@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from PIL import Image
 import argparse
-from typing import Union, Tuple
+from typing import Union, Tuple, List
 
 class ImageProcessor:
     def __init__(self, 
@@ -30,8 +30,10 @@ class ImageProcessor:
         # 出力ディレクトリの作成
         self.output_input_dir = self.output_dir / "input"
         self.output_mask_dir = self.output_dir / "mask"
+        self.output_output_dir = self.output_dir / "output"
         self.output_input_dir.mkdir(parents=True, exist_ok=True)
         self.output_mask_dir.mkdir(parents=True, exist_ok=True)
+        self.output_output_dir.mkdir(parents=True, exist_ok=True) 
 
     def calculate_target_size(self, img: Image.Image) -> Tuple[int, int]:
         """リサイズ後のサイズを計算"""
@@ -43,7 +45,7 @@ class ImageProcessor:
             target_height = int(img.height * self.size_value)
         return target_width, target_height
 
-    def process_image(self, img_path: Path) -> None:
+    def process_image(self, img_path: Path, output_subdir: Path) -> None:
         """画像の処理"""
         try:
             # 画像を読み込む
@@ -57,10 +59,10 @@ class ImageProcessor:
             img_resized = img_resized.resize((target_width, target_height), 
                                            Image.Resampling.LANCZOS)
             
-            output_img_path = self.output_input_dir / img_path.name
+            output_img_path = output_subdir / img_path.name
             img_resized.save(output_img_path, 'JPEG', quality=95)
 
-            # マスク画像の作成と保存
+            # マスク画像の作成と保存（入力画像がRGBAの場合のみ）
             if img.mode == 'RGBA':
                 alpha = img.split()[3]
                 mask_resized = alpha.resize((target_width, target_height), 
@@ -75,28 +77,43 @@ class ImageProcessor:
         except Exception as e:
             print(f"Error processing {img_path.name}: {e}")
 
+    def get_image_files(self, directory: Path) -> List[Path]:
+        """指定されたディレクトリから画像ファイルを取得"""
+        extensions = {'.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG'}
+        return [f for f in directory.iterdir() 
+                if f.is_file() and f.suffix in extensions]
+
     def process_directory(self):
         """ディレクトリ内の全画像を処理"""
-        extensions = {'.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG'}
+        # 入力ディレクトリとoutputディレクトリから画像ファイルを取得
+        input_files = self.get_image_files(self.input_dir)
+        output_files = []
         
-        # 入力ディレクトリ内の画像ファイルを取得
-        image_files = [
-            f for f in self.input_dir.iterdir() 
-            if f.is_file() and f.suffix in extensions
-        ]
+        # 元のoutputディレクトリが存在する場合、そのファイルも処理対象に追加
+        original_output_dir = self.input_dir / "output"
+        if original_output_dir.exists():
+            output_files = self.get_image_files(original_output_dir)
 
-        if not image_files:
-            print(f"No image files found in {self.input_dir}")
+        total_files = len(input_files) + len(output_files)
+        if total_files == 0:
+            print(f"No image files found in {self.input_dir} or its output directory")
             return
 
-        print(f"Found {len(image_files)} images to process")
+        print(f"Found {total_files} images to process")
         
-        # 各画像を処理
-        for img_path in image_files:
-            self.process_image(img_path)
+        # input内の画像を処理
+        for img_path in input_files:
+            self.process_image(img_path, self.output_input_dir)
+        
+        # output内の画像を処理
+        for img_path in output_files:
+            self.process_image(img_path, self.output_output_dir)
         
         print("\nProcessing complete!")
-        print(f"Output directories:\n{self.output_input_dir}\n{self.output_mask_dir}")
+        print(f"Output directories:")
+        print(f"Input images: {self.output_input_dir}")
+        print(f"Output images: {self.output_output_dir}")
+        print(f"Mask images: {self.output_mask_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description="Image and Mask Generator")
