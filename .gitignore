@@ -3,4 +3,5 @@
 /.conda
 /outputs
 /TEST_DATA
-/test_dataset/PlatinumChan_x1_gen/output
+test_dataset/*_gen*
+test_dataset/*test*
