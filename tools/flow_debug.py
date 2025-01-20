@@ -73,17 +73,22 @@ class FlowDebugVisualizer:
         return x, y
 
     def visualize_frame(self, frame_num: int) -> bool:
-        """1フレームの可視化"""
-        # データの読み込み
-        img = self._load_image(frame_num)
+        """1フレームの可視化（修正版: 画像ペアの重ね合わせ表示）"""
+        # フローデータと対応する2枚の画像を読み込み
         flow = self._load_flow(frame_num)
+        img1 = self._load_image(frame_num)      # 001.npy なら 001.png
+        img2 = self._load_image(frame_num + 1)  # 001.npy なら 002.png
         
-        if img is None or flow is None:
+        if img1 is None or img2 is None or flow is None:
             print(f"Failed to load data for frame {frame_num}")
             return False
 
+        # 画像の重ね合わせ
+        # img1を50%透過させた画像を作成
+        overlay = cv2.addWeighted(img1, 0.5, img2, 0.5, 0)
+
         # グリッドポイントの生成
-        x, y = self._create_grid_points(img.shape)
+        x, y = self._create_grid_points(img1.shape)
         
         # フローのサンプリング
         u = cv2.resize(flow[..., 0], (x.shape[1], x.shape[0]))
@@ -91,12 +96,17 @@ class FlowDebugVisualizer:
 
         # 描画
         plt.figure(figsize=(12, 8))
-        plt.imshow(img)
-        plt.quiver(x, y, u * self.flow_scale, v * self.flow_scale, 
-                  color='r', scale_units='xy', scale=1, 
-                  angles='xy', width=0.003)
         
-        plt.title(f'Frame {frame_num} Flow Visualization')
+        # 重ね合わせ画像の表示
+        plt.imshow(overlay)
+        
+        # フローベクトルの描画
+        plt.quiver(x, y, u * self.flow_scale, v * self.flow_scale, 
+                color='r', scale_units='xy', scale=1, 
+                angles='xy', width=0.003)
+        
+        # タイトルに使用した画像のペアを表示
+        plt.title(f'Flow Visualization - Images {frame_num:03d}-{frame_num+1:03d}')
         plt.axis('off')
         
         # 保存
