@@ -1,3 +1,4 @@
+# generator.py
 import os
 import torch
 from PIL import Image, ImageDraw
@@ -29,8 +30,12 @@ class StyleTransferInference:
 
     def _setup_logging(self):
         """ロギングの設定"""
+        if self.debug_mode:
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
         logging.basicConfig(
-            level=logging.INFO,
+            level=level,
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
         self.logger = logging.getLogger(__name__)
@@ -340,8 +345,8 @@ class StyleTransferInference:
         mask_conv /= erosion_weights.numel()
         
         # デバッグ情報
-        print(f"Mask tensor shape after erosion: {mask_conv.shape}")
-        print(f"Unique values in processed mask: {torch.unique(mask_conv)}")
+        self.logger.debug(f"Mask tensor shape after erosion: {mask_conv.shape}")
+        self.logger.debug(f"Unique values in processed mask: {torch.unique(mask_conv)}")
         
         return mask_conv.squeeze(0)
 
@@ -383,12 +388,12 @@ class StyleTransferInference:
                 used_positions.add(pos_key)
         
         # デバッグ情報
-        print(f"Original number of nonzero positions: {len(indices)}")
-        print(f"Number of selected patch positions: {len(valid_positions)}")
-        print(f"Overlap: {overlap_percent}%")
-        print(f"Stride: {stride}")
-        print(f"Patch size: {self.patch_size}")
-        print(f"Sample patch box: {valid_positions[0] if valid_positions else None}")
+        self.logger.debug(f"Original number of nonzero positions: {len(indices)}")
+        self.logger.debug(f"Number of selected patch positions: {len(valid_positions)}")
+        self.logger.debug(f"Overlap: {overlap_percent}%")
+        self.logger.debug(f"Stride: {stride}")
+        self.logger.debug(f"Patch size: {self.patch_size}")
+        self.logger.debug(f"Sample patch box: {valid_positions[0] if valid_positions else None}")
         
         return valid_positions
 
@@ -459,10 +464,46 @@ class StyleTransferInference:
             overlap_percent=overlap_percent
         )
         
+        def ensure_valid_patch_size(patch: torch.Tensor) -> torch.Tensor:
+            """パッチサイズが正しいことを確認し、必要に応じて調整"""
+            _, _, h, w = patch.shape
+            if h != self.patch_size or w != self.patch_size:
+                # パディングまたはトリミングを行う
+                new_patch = torch.zeros(
+                    (patch.size(0), patch.size(1), self.patch_size, self.patch_size),
+                    dtype=patch.dtype,
+                    device=patch.device
+                )
+                
+                # コピー可能な範囲を計算
+                h_copy = min(h, self.patch_size)
+                w_copy = min(w, self.patch_size)
+                
+                # 中央に配置するためのオフセットを計算
+                h_offset = (self.patch_size - h_copy) // 2
+                w_offset = (self.patch_size - w_copy) // 2
+                
+                # データをコピー
+                new_patch[
+                    :, :,
+                    h_offset:h_offset + h_copy,
+                    w_offset:w_offset + w_copy
+                ] = patch[:, :, :h_copy, :w_copy]
+                
+                self.logger.warning(
+                    f"Adjusted patch size from {h}x{w} to "
+                    f"{self.patch_size}x{self.patch_size}"
+                )
+                return new_patch
+            return patch
+
         for y_start, y_end, x_start, x_end in tqdm(patch_boxes, desc="Processing patches"):
             try:
                 # パッチを直接切り出し
                 patch = input_tensor[..., y_start:y_end, x_start:x_end]
+                
+                # パッチサイズの確認と調整
+                patch = ensure_valid_patch_size(patch)
                 
                 # パッチが正しいデバイスにあることを確認
                 if patch.device != device:
@@ -470,7 +511,17 @@ class StyleTransferInference:
                 
                 with torch.no_grad():
                     # パッチを生成器に渡す（全チャネルを使用）
-                    processed_patch = self.model.generator(patch)
+                    try:
+                        processed_patch = self.model.generator(patch)
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error in generator: input shape={patch.shape}, "
+                            f"error={str(e)}"
+                        )
+                        raise
+                    
+                    # 出力パッチが正しいサイズであることを確認
+                    processed_patch = ensure_valid_patch_size(processed_patch)
                     
                     # ガウシアンウェイト
                     patch_h, patch_w = y_end - y_start, x_end - x_start
@@ -478,14 +529,29 @@ class StyleTransferInference:
                             torch.exp(-((torch.arange(patch_w, device=device) - patch_w/2)**2 / (patch_w/4)**2))[None, :]
                     weight = weight.to(dtype)[None, None, :, :]
                     
+                    # 出力パッチのサイズに合わせてウェイトを調整
+                    if weight.shape[-2:] != processed_patch.shape[-2:]:
+                        weight = torch.nn.functional.interpolate(
+                            weight,
+                            size=processed_patch.shape[-2:],
+                            mode='bilinear',
+                            align_corners=False
+                        )
+                    
                     # 出力テンソルに結果を追加
-                    output[..., y_start:y_end, x_start:x_end] += processed_patch * weight
-                    weights[..., y_start:y_end, x_start:x_end] += weight[:, 0:1]
+                    h_slice = slice(y_start, min(y_start + processed_patch.shape[2], output.shape[2]))
+                    w_slice = slice(x_start, min(x_start + processed_patch.shape[3], output.shape[3]))
+                    
+                    output[..., h_slice, w_slice] += processed_patch[..., :h_slice.stop-h_slice.start, :w_slice.stop-w_slice.start] * \
+                                                    weight[..., :h_slice.stop-h_slice.start, :w_slice.stop-w_slice.start]
+                    weights[..., h_slice, w_slice] += weight[..., :h_slice.stop-h_slice.start, :w_slice.stop-w_slice.start]
                     
                     self.patch_positions.append((y_start, y_end, x_start, x_end))
                     
             except Exception as e:
-                self.logger.error(f"Error processing patch at position ({y_start}, {y_end}, {x_start}, {x_end}): {str(e)}")
+                self.logger.error(
+                    f"Error processing patch at position ({y_start}, {y_end}, {x_start}, {x_end}): {str(e)}"
+                )
                 raise
         
         # 重みで正規化
@@ -635,7 +701,7 @@ class StyleTransferInference:
                 self.process_image(str(input_path), str(mask_path), str(output_path))
             except Exception as e:
                 self.logger.error(f"Failed to process {input_path.name}: {str(e)}")
-                print(f"Error details: {e}")  # より詳細なエラー情報
+                self.logger.error(f"Error details: {e}")  # より詳細なエラー情報
                 continue
 
 @hydra.main(version_base=None, config_path="config", config_name="inference")
