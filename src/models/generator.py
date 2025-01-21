@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from torch import Tensor
-from typing import List, Optional
+from typing import List, Optional,Dict,Any
 
 class UpsamplingLayer(nn.Module):
     """アップサンプリングレイヤー
@@ -60,12 +60,12 @@ class ResNetBlock(nn.Module):
 class GeneratorJ(nn.Module):
     """スタイル変換用のGenerator
     - U-Net的な構造を持つ
-    - ダウンサンプリング -> ResNetブロック -> アップサンプリング
-    - スキップコネクションで詳細情報を保持
+    - 追加チャネルに対応
     """
     def __init__(
         self,
-        input_channels: int = 3,          # 入力チャネル数（RGB=3）
+        input_channels: int = 3,          # 基本入力チャネル数（RGB=3）
+        additional_channels: Optional[Dict[str, Any]] = None,
         filters: List[int] = [32, 64, 128, 128, 128, 64],  # 各層のフィルター数
         norm_layer: str = 'instance_norm', # 正規化層の種類
         use_bias: bool = False,           # バイアス項の使用
@@ -85,8 +85,9 @@ class GeneratorJ(nn.Module):
             norm = nn.BatchNorm2d
         elif norm_layer == 'instance_norm':
             norm = nn.InstanceNorm2d
-            
+        
         # 初期畳み込み層 (7x7カーネル)
+        # 追加チャネルを含む入力を処理
         self.initial_conv = self._make_conv_block(
             input_channels, filters[0], 7, 1, 3,
             use_bias, norm, nn.LeakyReLU(0.2, inplace=False)
@@ -208,9 +209,7 @@ class GeneratorJ(nn.Module):
         
     def forward(self, x: Tensor) -> Tensor:
         """順伝播処理
-        1. 特徴抽出（ダウンサンプリング）
-        2. 特徴変換（ResNetブロック）
-        3. 画像生成（アップサンプリング）
+        入力xは基本チャネルと追加チャネルが結合されたテンソル
         """
         # 初期特徴抽出
         conv0 = self.initial_conv(x)
