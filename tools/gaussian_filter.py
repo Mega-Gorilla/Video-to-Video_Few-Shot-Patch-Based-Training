@@ -6,7 +6,7 @@ from numba import jit, prange
 import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-from functools import partial
+from colorsys import hsv_to_rgb
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -157,10 +157,10 @@ class PoissonDiskSampling:
         )
 
 class GaussianFilter:
-    """最適化されたガウシアンフィルタ実装"""
+    """ガウシアンフィルタ実装"""
     def __init__(self, mask_dir, flow_fwd_dir, flow_bwd_dir, output_dir, 
                  frame_first, frame_last, key_frames, radius, sigma, 
-                 file_format='%03d', num_workers=None, max_points=1000): 
+                 file_format='%03d', num_workers=None, max_points=1000):
         
         if not key_frames:
             raise ValueError("key_frames list is empty")
@@ -204,6 +204,22 @@ class GaussianFilter:
         self.flow_cache = {}
         self.flow_cache_lock = threading.Lock()
 
+        # 色のマッピングを保持する辞書を追加
+        self.point_colors = {}
+        # 次に使用する色のインデックスを追加
+        self.next_color_index = 0
+        self.global_color_map = {}  # グローバルな色マッピング
+        self.next_global_id = 0     # グローバルな点のID
+
+    def get_unique_color(self, point_id: int) -> np.ndarray:
+        """一意の色を生成"""
+        if point_id not in self.point_colors:
+            # HSVカラースペースで色相を均等に分布させる
+            hue = (self.next_color_index * 0.618033988749895) % 1.0  # 黄金比を使用
+            self.point_colors[point_id] = np.array(hsv_to_rgb(hue, 0.8, 0.95))
+            self.next_color_index += 1
+        return self.point_colors[point_id]
+    
     def _get_flow(self, path: Path) -> Optional[np.ndarray]:
         """フローデータのスレッドセーフなキャッシング"""
         with self.flow_cache_lock:
@@ -213,8 +229,8 @@ class GaussianFilter:
                 self.flow_cache[path] = np.load(str(path))
             return self.flow_cache[path]
 
-    def generate_points(self, mask: np.ndarray) -> np.ndarray:
-        """点数制限付きの点群生成"""
+    def generate_points(self, mask: np.ndarray, frame_num: int) -> Tuple[np.ndarray, np.ndarray]:
+        """点群と色情報を生成（フレーム番号を考慮）"""
         h, w = mask.shape
         x_min = np.array([0, 0])
         x_max = np.array([w, h])
@@ -222,12 +238,21 @@ class GaussianFilter:
         sampler = PoissonDiskSampling(self.radius, x_min, x_max)
         points = sampler.generate(mask)
         
-        # 点数が制限を超える場合はランダムに間引く
         if len(points) > self.max_points:
             indices = np.random.choice(len(points), self.max_points, replace=False)
             points = points[indices]
-            
-        return points
+        
+        # フレーム番号を基にした一貫した色の割り当て
+        colors = []
+        for i in range(len(points)):
+            point_id = f"{frame_num}_{i}"  # フレーム番号とインデックスの組み合わせ
+            if point_id not in self.global_color_map:
+                hue = (self.next_global_id * 0.618033988749895) % 1.0
+                self.global_color_map[point_id] = hsv_to_rgb(hue, 0.8, 0.95)
+                self.next_global_id += 1
+            colors.append(self.global_color_map[point_id])
+        
+        return points, np.array(colors)
 
     def _get_last_valid_frame(self) -> int:
         """有効な最後のフレーム番号を取得"""
@@ -242,33 +267,46 @@ class GaussianFilter:
         return min(last_forward_flow, last_backward_flow, self.frame_last)
 
     def _process_output_frame(self, frame: int) -> str:
-        """1フレームの出力処理"""
+        """フレームの処理（色の一貫性を保持）"""
         try:
-            output = np.zeros((*self.size, 3), dtype=np.float32)
+            mask_path = self.mask_dir / f"{self.file_format % frame}.jpg"
+            if not mask_path.exists():
+                return f"Warning: No mask found for frame {frame}"
             
-            for k in range(len(self.key_frames)-1, -1, -1):
+            mask = cv2.imread(str(mask_path))
+            if mask is None:
+                return f"Error: Failed to read mask for frame {frame}"
+            
+            output = mask.astype(np.float32) / 255.0
+            
+            # 現在のフレームに最も近いキーフレームを特定
+            current_key_frame = None
+            for key_frame in self.key_frames:
+                if key_frame <= frame:
+                    current_key_frame = key_frame
+                else:
+                    break
+            
+            if current_key_frame is not None:
+                k = self.key_frames.index(current_key_frame)
                 if frame in self.pts[k]:
                     points = self.pts[k][frame]
                     if len(points) > 0:
-                        np.random.seed(1337 + k)
-                        colors = np.random.random((len(points), 3))
+                        # 点のIDに基づいて色を取得
+                        colors = np.array([self.get_unique_color(i) for i in range(len(points))])
                         _draw_points_numba(output, self.size, points, self.sigma, colors)
             
             output_path = self.output_dir / f"{self.file_format % frame}.png"
             cv2.imwrite(str(output_path), (output * 255).astype(np.uint8))
             return f"Saved frame {frame}"
-        
+            
         except Exception as e:
             return f"Error processing frame {frame}: {e}"
 
     def process(self):
-        """メイン処理（最適化版）"""
+        """メイン処理"""
         try:
             print(f"\nStarting process with {len(self.key_frames)} key frames")
-            
-            # フレーム範囲の検証と調整
-            self.frame_last = min(self.frame_last, self._get_last_valid_frame())
-            print(f"Adjusted frame range: {self.frame_first} to {self.frame_last}")
             
             # キーフレームごとの処理
             for k, key_frame in enumerate(self.key_frames):
@@ -285,105 +323,94 @@ class GaussianFilter:
                     print(f"Warning: Skip key frame {key_frame} - Failed to read mask: {mask_path}")
                     continue
                 
-                # 点群生成
-                key_points = self.generate_points(mask)
+                # 点群と色の生成
+                key_points, key_colors = self.generate_points(mask, key_frame)
                 if len(key_points) == 0:
                     print(f"Warning: Skip key frame {key_frame} - No points generated")
                     continue
                     
                 print(f"Generated {len(key_points)} points")
                 self.pts[k][key_frame] = key_points
-
-                # 前方伝播
-                if self.frame_last > key_frame:
+                # 色情報も保存
+                if not hasattr(self, 'colors'):
+                    self.colors = {}
+                if k not in self.colors:
+                    self.colors[k] = {}
+                self.colors[k][key_frame] = key_colors
+                
+                # キーフレーム間の範囲を決定
+                next_key_frame = float('inf')
+                prev_key_frame = -1
+                if k + 1 < len(self.key_frames):
+                    next_key_frame = self.key_frames[k + 1]
+                if k > 0:
+                    prev_key_frame = self.key_frames[k - 1]
+                
+                # 前方伝播（現在のキーフレームから次のキーフレームまで）
+                if key_frame < next_key_frame and key_frame < self.frame_last:
                     print(f"Forward propagation from frame {key_frame}")
                     points = key_points.copy()
-                    
-                    for frame in range(key_frame + 1, self.frame_last + 1):
-                        try:
-                            flow = self._get_flow(
-                                self.flow_bwd_dir / f"{self.file_format % (frame-1)}.npy"
-                            )
-                            
-                            if flow is None:
-                                print(f"Warning: No flow data for frame {frame-1}")
-                                break
-                            
-                            if len(points) > 0:
-                                new_points = []
-                                for p in points:
-                                    if 0 <= p[0] < self.size[1] and 0 <= p[1] < self.size[0]:
-                                        new_p = p + _sample_bilinear_numba(flow, p)
-                                        if 0 <= new_p[0] < self.size[1] and 0 <= new_p[1] < self.size[0]:
-                                            new_points.append(new_p)
-                                            
-                                points = np.array(new_points)
-                                if len(points) > 0:
-                                    self.pts[k][frame] = points.copy()
-                                else:
-                                    print(f"No valid points for frame {frame}")
-                                    break
-                            else:
-                                print(f"No points to propagate at frame {frame}")
-                                break
-                                
-                        except Exception as e:
-                            print(f"Error in forward propagation at frame {frame}: {e}")
+                    for frame in range(key_frame + 1, min(next_key_frame, self.frame_last + 1)):
+                        flow_path = self.flow_bwd_dir / f"{self.file_format % (frame-1)}.npy"
+                        flow = self._get_flow(flow_path)
+                        if flow is None:
+                            print(f"Warning: No forward flow data for frame {frame-1}")
                             break
-
-                # 後方伝播
-                if self.frame_first < key_frame:
+                            
+                        if len(points) > 0:
+                            new_points = []
+                            for p in points:
+                                if 0 <= p[0] < self.size[1] and 0 <= p[1] < self.size[0]:
+                                    new_p = p + _sample_bilinear_numba(flow, p)
+                                    if 0 <= new_p[0] < self.size[1] and 0 <= new_p[1] < self.size[0]:
+                                        new_points.append(new_p)
+                            
+                            points = np.array(new_points)
+                            if len(points) > 0:
+                                self.pts[k][frame] = points.copy()
+                                print(f"Frame {frame}: {len(points)} points")
+                            else:
+                                print(f"No valid points for frame {frame}")
+                                break
+                
+                # 後方伝播（現在のキーフレームから前のキーフレームまで）
+                if key_frame > prev_key_frame and key_frame > self.frame_first:
                     print(f"Backward propagation from frame {key_frame}")
                     points = key_points.copy()
-                    
-                    for frame in range(key_frame - 1, self.frame_first - 1, -1):
-                        try:
-                            flow = self._get_flow(
-                                self.flow_fwd_dir / f"{self.file_format % frame}.npy"
-                            )
-                            
-                            if flow is None:
-                                print(f"Warning: No flow data for frame {frame}")
-                                break
-                            
-                            if len(points) > 0:
-                                new_points = []
-                                for p in points:
-                                    if 0 <= p[0] < self.size[1] and 0 <= p[1] < self.size[0]:
-                                        new_p = p + _sample_bilinear_numba(flow, p)
-                                        if 0 <= new_p[0] < self.size[1] and 0 <= new_p[1] < self.size[0]:
-                                            new_points.append(new_p)
-                                            
-                                points = np.array(new_points)
-                                if len(points) > 0:
-                                    self.pts[k][frame] = points.copy()
-                                else:
-                                    print(f"No valid points for frame {frame}")
-                                    break
-                            else:
-                                print(f"No points to propagate at frame {frame}")
-                                break
-                                
-                        except Exception as e:
-                            print(f"Error in backward propagation at frame {frame}: {e}")
+                    for frame in range(key_frame - 1, max(prev_key_frame, self.frame_first - 1), -1):
+                        flow_path = self.flow_fwd_dir / f"{self.file_format % frame}.npy"
+                        flow = self._get_flow(flow_path)
+                        if flow is None:
+                            print(f"Warning: No backward flow data for frame {frame}")
                             break
+                            
+                        if len(points) > 0:
+                            new_points = []
+                            for p in points:
+                                if 0 <= p[0] < self.size[1] and 0 <= p[1] < self.size[0]:
+                                    new_p = p + _sample_bilinear_numba(flow, p)
+                                    if 0 <= new_p[0] < self.size[1] and 0 <= new_p[1] < self.size[0]:
+                                        new_points.append(new_p)
+                            
+                            points = np.array(new_points)
+                            if len(points) > 0:
+                                self.pts[k][frame] = points.copy()
+                                print(f"Frame {frame}: {len(points)} points")
+                            else:
+                                print(f"No valid points for frame {frame}")
+                                break
 
             # 結果の描画と保存
             print("\nDrawing and saving results...")
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                frame_range = range(self.frame_first, self.frame_last + 1)
                 futures = []
-                
-                for frame in frame_range:
+                for frame in range(self.frame_first, self.frame_last + 1):
                     future = executor.submit(self._process_output_frame, frame)
                     futures.append(future)
                 
                 for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                        print(result)
-                    except Exception as e:
-                        print(f"Error in frame processing: {e}")
+                    result = future.result()
+                    print(result)
 
         except Exception as e:
             print(f"Error in process: {e}")
