@@ -5,10 +5,10 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from PIL import Image
 from torchvision import transforms
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Union
 import numpy as np
 from .transforms import RGBConvert, GrayscaleConvert
-import platform
+from omegaconf import DictConfig
 
 class StyleTransferDataset(Dataset):
     def __init__(
@@ -17,7 +17,6 @@ class StyleTransferDataset(Dataset):
         dir_post: str,         # 変換後の目標画像のディレクトリ
         dir_mask: str,         # マスク画像のディレクトリ
         patch_size: int,       # 抽出するパッチのサイズ
-        device: str,           # 使用するデバイス（CPU/GPU）
         augmentation_factor: int = 1,  # データ拡張倍数
         additional_channels: Optional[Dict[str, str]] = None  # 追加の入力チャネル
     ):
@@ -45,7 +44,10 @@ class StyleTransferDataset(Dataset):
         ])
             
         # 画像ファイルのパスを取得
-        self.image_paths = sorted([f for f in os.listdir(dir_pre) if f.endswith(('.png', '.jpg', '.jpeg'))])
+        self.image_paths = sorted([
+            f for f in os.listdir(dir_pre) 
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
         
         # データ保持用のリストを初期化
         self.images_pre = []       # 入力画像のリスト
@@ -80,16 +82,49 @@ class StyleTransferDataset(Dataset):
         input("Press Enter to continue...")
         plt.close()
 
+    def _find_corresponding_image(self, base_dir: Union[str, Dict, DictConfig], image_name: str) -> str:
+        """
+        指定されたベースディレクトリで、対応する画像ファイルを探す
+        Args:
+            base_dir: 文字列のパス、または設定辞書
+            image_name: 画像ファイル名
+        Returns:
+            str: 完全なファイルパス
+        """
+        # DictConfigまたは辞書の場合、pathキーを使用
+        if isinstance(base_dir, (dict, DictConfig)):
+            base_dir = base_dir.get('path')
+        
+        # 元のファイル名から拡張子を除去
+        base_name = os.path.splitext(image_name)[0]
+        
+        # サポートする拡張子のリスト
+        extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
+        
+        # 各拡張子でファイルの存在をチェック
+        for ext in extensions:
+            file_path = os.path.join(base_dir, base_name + ext)
+            if os.path.exists(file_path):
+                return file_path
+                
+        # 対応するファイルが見つからない場合は元のパスを返す
+        return os.path.join(base_dir, image_name)
+    
     def _load_images(self):
-        """画像読み込み処理（デバッグ版）"""
+        """画像読み込み処理"""
         print("\nStarting image loading process...")
         print(f"Number of image paths: {len(self.image_paths)}")
         
+        # 追加チャネルのデータを保持するための辞書
+        self.additional_channel_data = {
+            channel_name: [] for channel_name in self.additional_channels.keys()
+        }
+
         for img_path in self.image_paths:
             print(f"\nProcessing image: {img_path}")
             
             # 入力画像の読み込み
-            pre_path = os.path.join(self.dir_pre, img_path)
+            pre_path = self._find_corresponding_image(self.dir_pre, img_path)
             print(f"Loading input image from: {pre_path}")
             try:
                 pre_img = Image.open(pre_path)
@@ -101,7 +136,7 @@ class StyleTransferDataset(Dataset):
                 continue
                 
             # 目標画像の読み込み
-            post_path = os.path.join(self.dir_post, img_path)
+            post_path = self._find_corresponding_image(self.dir_post, img_path)
             print(f"Loading target image from: {post_path}")
             try:
                 post_img = Image.open(post_path)
@@ -112,8 +147,8 @@ class StyleTransferDataset(Dataset):
                 print(f"Error loading target image: {e}")
                 continue
 
-            # マスク画像の処理
-            mask_path = os.path.join(self.dir_mask, img_path)
+            # マスク画像の読み込み
+            mask_path = self._find_corresponding_image(self.dir_mask, img_path)
             print(f"Loading mask from: {mask_path}")
             try:
                 mask = Image.open(mask_path)
@@ -146,12 +181,30 @@ class StyleTransferDataset(Dataset):
                     self.images_post.pop()
                 continue
 
-        print("\nImage loading completed!")
-        print(f"Total images loaded: {len(self.images_pre)}")
-        print(f"Total masks processed: {len(self.valid_indices)}")
-        
-        if len(self.images_pre) == 0:
-            raise ValueError("No images were successfully loaded!")
+            # 追加チャネルの読み込み
+            try:
+                for channel_name, channel_config in self.additional_channels.items():
+                    channel_path = self._find_corresponding_image(channel_config, img_path)
+                    print(f"Loading {channel_name} channel from: {channel_path}")
+                    try:
+                        channel_img = Image.open(channel_path)
+                        channel_tensor = self.transform(channel_img)
+                        self.additional_channel_data[channel_name].append(channel_tensor)
+                        print(f"Successfully loaded {channel_name} channel, shape: {channel_tensor.shape}")
+                    except Exception as e:
+                        print(f"Error loading {channel_name} channel: {e}")
+                        raise  # エラーを再送出して処理を中断
+            except Exception as e:
+                print(f"Error loading additional image: {e}")
+                # エラーが発生した場合、この画像セット全体をスキップ
+                if len(self.images_pre) > len(self.valid_indices):
+                    self.images_pre.pop()
+                    self.images_post.pop()
+                    # 既に追加された追加チャネルデータも削除
+                    for ch_name in self.additional_channel_data:
+                        if self.additional_channel_data[ch_name]:
+                            self.additional_channel_data[ch_name].pop()
+                continue
             
     def _cut_patch(self, tensor: torch.Tensor, midpoint: torch.Tensor) -> torch.Tensor:
         """指定された中心座標からパッチを切り出す"""
@@ -179,11 +232,17 @@ class StyleTransferDataset(Dataset):
         return patch
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """データセットからアイテムを取得"""
+        """
+        データセットからアイテムを取得
+        Args:
+            idx (int): インデックス
+        Returns:
+            Dict[str, torch.Tensor]: 'pre'(入力), 'post'(出力), channel_{name}(追加チャネル)を含む辞書
+        """
         # 画像のインデックスを計算
         img_idx = idx % len(self.images_pre)
         
-        # パッチ位置の記録用リスト
+        # パッチ位置の記録用リストを初期化
         self.last_patch_positions = []
 
         # 有効なパッチの中心をランダムに選択
@@ -194,31 +253,44 @@ class StyleTransferDataset(Dataset):
         # ランダムに中心点を選択し、使用済みリストから削除
         center_idx = np.random.randint(0, len(self.valid_indices_left[img_idx]))
         midpoint = self.valid_indices[img_idx][self.valid_indices_left[img_idx][center_idx]]
+        self.valid_indices_left[img_idx].pop(center_idx)
         
         # パッチ位置を記録
         self.last_patch_positions.append(midpoint.tolist())
-        
-        # 拡張倍数が1より大きい場合のみ追加のランダムパッチを生成
-        if self.augmentation_factor > 1:
-            midpoint_r = self.valid_indices[img_idx][np.random.randint(0, len(self.valid_indices[img_idx]))]
-            self.last_patch_positions.append(midpoint_r.tolist())
-            random_patch = self._cut_patch(self.images_post[img_idx], midpoint_r)
-        else:
-            random_patch = None  # 拡張なしの場合はNone
-        
-        # パッチの切り出し
-        pre_patch = self._cut_patch(self.images_pre[img_idx], midpoint)
-        post_patch = self._cut_patch(self.images_post[img_idx], midpoint)
-        
+
+        # 基本のパッチを切り出し
         result = {
-            'pre': pre_patch,
-            'post': post_patch,
+            'pre': self._cut_patch(self.images_pre[img_idx], midpoint),
+            'post': self._cut_patch(self.images_post[img_idx], midpoint),
         }
         
-        # 拡張倍数が1より大きい場合のみ追加のパッチを含める
-        if random_patch is not None:
-            result['already'] = random_patch
+        # 追加チャネルのパッチを切り出し
+        for channel_name in self.additional_channels:
+            channel_patch = self._cut_patch(
+                self.additional_channel_data[channel_name][img_idx], 
+                midpoint
+            )
+            result[f'channel_{channel_name}'] = channel_patch
+        
+        # データ拡張処理（augmentation_factor > 1 の場合）
+        if self.augmentation_factor > 1:
+            # 別のランダムな位置からパッチを切り出し
+            random_idx = np.random.randint(0, len(self.valid_indices[img_idx]))
+            midpoint_r = self.valid_indices[img_idx][random_idx]
             
+            # パッチ位置を記録
+            self.last_patch_positions.append(midpoint_r.tolist())
+            
+            # 拡張データを追加
+            result['already'] = self._cut_patch(self.images_post[img_idx], midpoint_r)
+            
+            # 追加チャネルの拡張データも追加（必要な場合）
+            for channel_name in self.additional_channels:
+                result[f'channel_{channel_name}_aug'] = self._cut_patch(
+                    self.additional_channel_data[channel_name][img_idx], 
+                    midpoint_r
+                )
+        
         return result
 
     def __len__(self) -> int:
