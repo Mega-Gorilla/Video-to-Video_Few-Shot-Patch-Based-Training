@@ -9,9 +9,9 @@ generator:
     append_smoothers: true      # スムージング層を追加するか
     resnet_blocks: 7            # ResNetブロックの数
     filters: [32, 64, 128, 128, 128, 64]  # 各層のフィルター数
-    input_channels: 3           # 入力チャネル数
     norm_layer: "instance_norm" # 正規化層の種類
     input_size: 256            # 入力画像サイズ
+    input_channels: "auto"
 
 # 識別器の設定
 discriminator:
@@ -19,11 +19,11 @@ discriminator:
   args:
     num_filters: 12            # 基本フィルター数
     n_layers: 2                # レイヤー数
-    input_channels: 3          # 入力チャネル数
     use_noise: false           # ノイズを使用するか
     noise_sigma: 0.2           # ノイズの標準偏差
     norm_layer: "instance_norm"  # 正規化層の種類
     use_bias: true             # バイアスを使用するか
+    input_channels: 3
 
 # 知覚的損失の設定
 perception_loss:
