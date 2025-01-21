@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from PIL import Image
 import argparse
-from typing import Union, Tuple, List
+from typing import Union, Tuple, List, Dict
 from tqdm import tqdm
 
 class ImageProcessor:
@@ -27,6 +27,7 @@ class ImageProcessor:
         self.output_dir = Path(output_dir)
         self.size_mode = size_mode
         self.size_value = size_value
+        self.target_sizes: Dict[str, Tuple[int, int]] = {}  # 入力画像名とターゲットサイズの対応を保存
 
         # 入力サブディレクトリのパスを設定
         self.input_images_dir = self.input_dir / "input"
@@ -44,22 +45,29 @@ class ImageProcessor:
                         self.output_output_dir, self.output_tracking_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
 
-    def calculate_target_size(self, img: Image.Image) -> Tuple[int, int]:
-        """リサイズ後のサイズを計算"""
+    def calculate_target_size(self, img: Image.Image, base_name: str) -> Tuple[int, int]:
+        """リサイズ後のサイズを計算して保存"""
         if self.size_mode == "width":
             target_width = int(self.size_value)
             target_height = int(target_width * img.height / img.width)
         else:  # scale
             target_width = int(img.width * self.size_value)
             target_height = int(img.height * self.size_value)
+        
+        self.target_sizes[base_name] = (target_width, target_height)
         return target_width, target_height
+
+    def get_target_size(self, base_name: str) -> Tuple[int, int]:
+        """保存されたターゲットサイズを取得"""
+        return self.target_sizes.get(base_name, (self.size_value, self.size_value))
 
     def process_input_image(self, img_path: Path) -> None:
         """入力画像の処理（リサイズ、マスク生成）"""
         try:
             # 画像を読み込む
             img = Image.open(img_path)
-            target_width, target_height = self.calculate_target_size(img)
+            base_name = img_path.stem
+            target_width, target_height = self.calculate_target_size(img, base_name)
 
             # 入力画像のリサイズと保存
             img_resized = img.copy()
@@ -85,11 +93,12 @@ class ImageProcessor:
             print(f"Error processing input image {img_path.name}: {e}")
 
     def process_other_image(self, img_path: Path, output_subdir: Path) -> None:
-        """その他の画像の処理（リサイズのみ）"""
+        """その他の画像の処理（入力画像に合わせたリサイズ）"""
         try:
             # 画像を読み込む
             img = Image.open(img_path)
-            target_width, target_height = self.calculate_target_size(img)
+            base_name = img_path.stem
+            target_width, target_height = self.get_target_size(base_name)
 
             # 画像のリサイズと保存
             img_resized = img.copy()
@@ -117,39 +126,35 @@ class ImageProcessor:
         """ディレクトリ内の全画像を処理"""
         print("Processing resize images...")
         
-        # 入力ディレクトリとoutputディレクトリから画像ファイルを取得
+        # まず入力画像を処理してターゲットサイズを計算
         input_files = self.get_image_files(self.input_images_dir)
+        if not input_files:
+            print("No input images found in input directory")
+            return
+
+        print("Processing input images and calculating target sizes...")
+        for img_path in tqdm(input_files, desc="Input images", unit="images"):
+            self.process_input_image(img_path)
+
+        # 他のディレクトリの画像を処理
         output_files = self.get_image_files(self.input_output_dir)
         tracking_files = self.get_image_files(self.input_tracking_dir)
 
-        total_files = len(input_files) + len(output_files) + len(tracking_files)
-        if total_files == 0:
-            print("No image files found in input directories")
-            return
+        print("\nProcessing other images...")
+        with tqdm(total=len(output_files) + len(tracking_files), desc="Other images", unit="images") as pbar:
+            # output内の画像を処理
+            for img_path in output_files:
+                self.process_other_image(img_path, self.output_output_dir)
+                pbar.update(1)
 
-        # プログレスバーの設定
-        pbar = tqdm(total=total_files, desc="Progress", unit="images")
+            # tracking内の画像を処理
+            for img_path in tracking_files:
+                self.process_other_image(img_path, self.output_tracking_dir)
+                pbar.update(1)
 
-        # input内の画像を処理（リサイズ、マスク生成）
-        for img_path in input_files:
-            self.process_input_image(img_path)
-            pbar.update(1)
-        
-        # output内の画像を処理（リサイズのみ）
-        for img_path in output_files:
-            self.process_other_image(img_path, self.output_output_dir)
-            pbar.update(1)
-
-        # tracking内の画像を処理（リサイズのみ）
-        for img_path in tracking_files:
-            self.process_other_image(img_path, self.output_tracking_dir)
-            pbar.update(1)
-
-        pbar.close()
         print("\nProcessing complete!")
 
 def main():
-    # python tools\imageprocessor.py ./test_dataset/platinum_chan_gen_sorce/ ./test_dataset\PlatinumChan_x0.5_gen --size-mode scale --size-value 0.5
     parser = argparse.ArgumentParser(description="Image and Mask Generator")
     parser.add_argument("input_dir", help="Input directory containing images")
     parser.add_argument("output_dir", help="Output base directory")
