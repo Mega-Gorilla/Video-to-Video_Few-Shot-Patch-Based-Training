@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from typing import Optional, Tuple
+from typing import Optional,Dict,Any
 
 class DiscriminatorN_IN(nn.Module):
     """
@@ -13,6 +14,7 @@ class DiscriminatorN_IN(nn.Module):
     def __init__(
         self,
         input_channels: int = 3,          # 入力チャネル数（RGB画像なら3）
+        additional_channels: Optional[Dict[str, Any]] = None,
         num_filters: int = 64,            # 基本的なフィルター数
         n_layers: int = 3,                # 畳み込み層の数
         use_noise: bool = False,          # ノイズ付加の有無
