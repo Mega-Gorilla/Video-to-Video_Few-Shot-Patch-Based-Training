@@ -19,6 +19,7 @@ class StyleTransferInference:
         self.cfg = cfg
         self._setup_logging()
         self._setup_transforms()
+        self._load_data_config()
         self._setup_model()
         
         # パッチサイズを学習時の設定から取得
@@ -33,15 +34,62 @@ class StyleTransferInference:
             format='%(asctime)s - %(levelname)s - %(message)s'
         )
         self.logger = logging.getLogger(__name__)
+    
+    def _calculate_total_channels(self) -> int:
+        """総入力チャネル数を計算"""
+        base_channels = 3  # RGB基本チャネル
+        additional_channel_depth = 0
+
+        if hasattr(self.cfg.paths, 'additional_channels'):
+            from omegaconf import OmegaConf
+            additional_channels = OmegaConf.to_container(self.cfg.paths.additional_channels)
+            
+            for channel_name, channel_config in additional_channels.items():
+                if isinstance(channel_config, dict):
+                    depth = int(channel_config.get('depth', 1))
+                else:
+                    depth = 1
+                    
+                additional_channel_depth += depth
+                self.logger.info(f"Channel {channel_name}: depth = {depth}")
+
+        total_channels = base_channels + additional_channel_depth
+        self.logger.info(f"Total channels: {total_channels} (RGB: 3 + Additional: {additional_channel_depth})")
+        return total_channels
+
+    def _validate_additional_channels(self):
+        """追加チャネルの設定を検証"""
+        if not hasattr(self.cfg.paths, 'additional_channels'):
+            self.logger.info("No additional channels configured.")
+            return
+
+        from omegaconf import OmegaConf
+        additional_channels = OmegaConf.to_container(self.cfg.paths.additional_channels)
+
+        self.logger.info("\nValidating additional channels configuration:")
+        for channel_name, channel_config in additional_channels.items():
+            path = str(channel_config.get('path'))
+            depth = int(channel_config.get('depth', 1))
+            
+            if not path:
+                raise ValueError(f"Channel {channel_name}: 'path' is required")
+            if not isinstance(depth, int) or depth < 1:
+                raise ValueError(f"Channel {channel_name}: 'depth' must be a positive integer")
+                
+            self.logger.info(f"Channel '{channel_name}':")
+            self.logger.info(f"  - Path: {path}")
+            self.logger.info(f"  - Depth: {depth}")
 
     def _setup_transforms(self):
         """変換処理の設定"""
+        # すべてのチャネル（RGB及び追加チャネル）に共通の変換処理
         self.transform = transforms.Compose([
             RGBConvert(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
         
+        # マスク用の変換処理
         self.mask_transform = transforms.Compose([
             GrayscaleConvert(),
             transforms.ToTensor()
@@ -49,31 +97,202 @@ class StyleTransferInference:
 
     def _setup_model(self):
         """モデルの設定とロード"""
-        # デバイスの設定
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() and self.cfg.inference.use_gpu else "cpu"
-        )
+        try:
+            self.logger.info("=== Setting up Model ===")
+            
+            # デバイスの設定
+            self.device = torch.device(
+                "cuda" if torch.cuda.is_available() and self.cfg.inference.use_gpu else "cpu"
+            )
+            
+            # チェックポイントを先に読み込んでチャネル数を確認
+            self.logger.info(f"Loading checkpoint from: {self.cfg.paths.checkpoint}")
+            checkpoint = torch.load(self.cfg.paths.checkpoint, map_location=self.device)
+            
+            # 生成器の初期畳み込み層のチャネル数を確認
+            initial_conv_weight = checkpoint['state_dict']['generator.initial_conv.0.weight']
+            checkpoint_input_channels = initial_conv_weight.shape[1]
+            
+            # 現在の設定のチャネル数と比較
+            if hasattr(self, 'total_channels') and self.total_channels != checkpoint_input_channels:
+                raise ValueError(
+                    f"Channel count mismatch! "
+                    f"Checkpoint model expects {checkpoint_input_channels} channels, "
+                    f"but current configuration has {self.total_channels} channels "
+                    f"(RGB: {self.base_channels}, Additional: {sum(self.channel_info.values() if hasattr(self, 'channel_info') else [0])}). "
+                    f"Please ensure the model was trained with the same channel configuration."
+                )
+            
+            # OmegaConfの設定を辞書に変換してから再度OmegaConfオブジェクトに変換
+            from omegaconf import OmegaConf
+            
+            # generator_configの処理
+            generator_dict = OmegaConf.to_container(self.cfg.model.generator, resolve=True)
+            if "args" not in generator_dict:
+                generator_dict["args"] = {}
+            
+            generator_dict["args"].update({
+                "input_channels": checkpoint_input_channels,
+                "additional_channels": None  # チェックポイントのモデル構造に合わせる
+            })
+            generator_config = OmegaConf.create(generator_dict)
+            
+            # discriminator_configの処理
+            discriminator_dict = OmegaConf.to_container(self.cfg.model.discriminator, resolve=True)
+            discriminator_config = OmegaConf.create(discriminator_dict)
+            
+            # training_configの処理
+            training_dict = OmegaConf.to_container(self.cfg.training, resolve=True)
+            training_config = OmegaConf.create(training_dict)
+            
+            # optimizer_configの処理
+            optimizer_dict = OmegaConf.to_container(self.cfg.optimizer, resolve=True)
+            optimizer_config = OmegaConf.create(optimizer_dict)
+            
+            # data_configの処理
+            data_dict = OmegaConf.to_container(self.cfg.data, resolve=True)
+            data_config = OmegaConf.create(data_dict)
+            
+            # perception_loss_configの処理
+            perception_loss_dict = OmegaConf.to_container(self.cfg.model.perception_loss, resolve=True)
+            perception_loss_config = OmegaConf.create(perception_loss_dict)
+            
+            self.logger.info(f"Generator configuration:")
+            self.logger.info(f"- Input channels from checkpoint: {checkpoint_input_channels}")
+            self.logger.info(f"- Current total channels: {self.total_channels if hasattr(self, 'total_channels') else 'Not set'}")
+            
+            # モデルの初期化
+            self.model = StyleTransferModel(
+                generator_config=generator_config,
+                discriminator_config=discriminator_config,
+                training_config=training_config,
+                optimizer_config=optimizer_config,
+                data_config=data_config,
+                perception_loss_config=perception_loss_config
+            )
+            
+            # チェックポイントのロード
+            self.model.load_state_dict(checkpoint['state_dict'], strict=True)
+            self.model.to(self.device)
+            self.model.eval()
+            
+            if torch.cuda.is_available():
+                self.model.generator = self.model.generator.half()
+                
+            self.logger.info("Model setup completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during model setup: {str(e)}")
+            raise RuntimeError(
+                "Failed to initialize model. Please check the model configuration "
+                "and ensure it matches the checkpoint architecture."
+            ) from e
+    
+    def _load_data_config(self):
+        """データ設定の読み込み - 追加チャネルを動的に処理"""
+        self.logger.info("=== Loading Data Configuration ===")
         
-        # モデルの初期化
-        self.model = StyleTransferModel(
-            generator_config=self.cfg.model.generator,
-            discriminator_config=self.cfg.model.discriminator,
-            training_config=self.cfg.training,
-            optimizer_config=self.cfg.optimizer,
-            data_config=self.cfg.data,
-            perception_loss_config=self.cfg.model.perception_loss
-        )
+        # RGB基本チャネル数
+        self.base_channels = 3
+        self.additional_channels = {}
         
-        # チェックポイントの読み込み
-        checkpoint = torch.load(self.cfg.paths.checkpoint, map_location=self.device)
-        self.model.load_state_dict(checkpoint['state_dict'], strict=True)
-        self.model.to(self.device)
-        self.model.eval()
+        # OmegaConfをインポート
+        from omegaconf import OmegaConf
         
-        # FP16の使用（GPUの場合）
-        if torch.cuda.is_available():
-            self.model.generator = self.model.generator.half()
+        # 追加チャネルの処理
+        if hasattr(self.cfg.paths, 'additional_channels'):
+            # DictConfigを通常の辞書に変換
+            additional_channels = OmegaConf.to_container(self.cfg.paths.additional_channels)
+            
+            # 追加チャネルの検証
+            self._validate_additional_channels()
+            
+            # チャネル情報の初期化
+            self.channel_info = {}
+            
+            for channel_name, channel_config in additional_channels.items():
+                try:
+                    # 設定がdict形式かどうかを確認
+                    if isinstance(channel_config, dict):
+                        channel_path = str(channel_config['path'])
+                        channel_depth = int(channel_config.get('depth', 1))
+                    else:
+                        # 後方互換性のための処理
+                        channel_path = str(channel_config)
+                        channel_depth = 1
 
+                    # チャネルパスの存在確認
+                    channel_dir = Path(channel_path)
+                    if not channel_dir.exists():
+                        raise FileNotFoundError(f"Channel directory not found: {channel_dir}")
+
+                    # サンプル画像を読み込んでチャネル数を確認
+                    sample_files = list(channel_dir.glob("*.[pj][np][g]"))
+                    if not sample_files:
+                        raise FileNotFoundError(f"No images found in {channel_path}")
+                        
+                    sample_image = Image.open(sample_files[0])
+                    actual_channels = len(sample_image.getbands())
+                    
+                    if actual_channels < channel_depth:
+                        raise ValueError(
+                            f"Channel {channel_name} has insufficient channels: "
+                            f"expected {channel_depth}, but found {actual_channels}"
+                        )
+                    
+                    # チャネル情報を保存
+                    self.channel_info[channel_name] = {
+                        'path': channel_path,
+                        'depth': channel_depth,
+                        'actual_channels': actual_channels
+                    }
+                    
+                    # 追加チャネル情報を保存
+                    self.additional_channels[channel_name] = channel_path
+                    
+                    self.logger.info(
+                        f"Channel {channel_name}: path={channel_path}, "
+                        f"depth={channel_depth}, actual_channels={actual_channels}"
+                    )
+
+                except Exception as e:
+                    self.logger.error(f"Error processing channel {channel_name}: {str(e)}")
+                    raise
+
+            # 総チャネル数を計算
+            self.total_channels = self._calculate_total_channels()
+        else:
+            self.total_channels = self.base_channels
+            self.logger.info(f"No additional channels found. Using RGB ({self.base_channels} channels) only.")
+
+
+    def _find_corresponding_image(self, base_dir: str, image_name: str) -> str:
+        """
+        指定されたベースディレクトリで、対応する画像ファイルを探す
+        異なる拡張子（png, jpg, jpeg）でも対応する
+        
+        Args:
+            base_dir: 検索するディレクトリのパス
+            image_name: 元のファイル名
+        Returns:
+            str: 見つかった画像ファイルの完全なパス
+        """
+        # 元のファイル名から拡張子を除去
+        base_name = os.path.splitext(os.path.basename(image_name))[0]
+        
+        # サポートする拡張子のリスト
+        extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG']
+        
+        # 各拡張子でファイルの存在をチェック
+        for ext in extensions:
+            file_path = os.path.join(base_dir, base_name + ext)
+            if os.path.exists(file_path):
+                self.logger.info(f"Found corresponding image: {file_path}")
+                return file_path
+        
+        # 対応するファイルが見つからない場合は元のパスを返す
+        return os.path.join(base_dir, image_name)
+    
     def _draw_patches(
         self, 
         image: Image.Image, 
@@ -206,141 +425,184 @@ class StyleTransferInference:
         mask_tensor: Optional[torch.Tensor] = None,
         overlap_percent: float = 30.0
     ) -> torch.Tensor:
-        """画像を処理
-        Args:
-            input_tensor: 入力画像テンソル
-            mask_tensor: マスクテンソル
-            overlap_percent: パッチ間の重なりの割合（0-100%）
-        """
+        """画像を処理"""
+        # デバイスの確認と設定
+        if torch.cuda.is_available() and self.cfg.inference.use_gpu:
+            device = torch.device('cuda:0')
+            if not input_tensor.is_cuda:
+                input_tensor = input_tensor.cuda()
+            if mask_tensor is not None and not mask_tensor.is_cuda:
+                mask_tensor = mask_tensor.cuda()
+        else:
+            device = torch.device('cpu')
+            if input_tensor.is_cuda:
+                input_tensor = input_tensor.cpu()
+            if mask_tensor is not None and mask_tensor.is_cuda:
+                mask_tensor = mask_tensor.cpu()
+
+        # モデルを正しいデバイスに移動
+        self.model = self.model.to(device)
+        
         b, c, h, w = input_tensor.shape
-        device = input_tensor.device
         dtype = input_tensor.dtype
         
-        output = torch.zeros((b, c, h, w), dtype=dtype, device=device)
+        # 出力テンソルの初期化（RGBのみ）
+        output = torch.zeros((b, 3, h, w), dtype=dtype, device=device)
         weights = torch.zeros((b, 1, h, w), dtype=dtype, device=device)
         
         if mask_tensor is None:
             mask_tensor = torch.ones((b, 1, h, w), dtype=dtype, device=device)
-        else:
-            mask_tensor = mask_tensor.repeat(1, c, 1, 1)
         
         # パッチの境界ボックスを取得
         patch_boxes = self._get_valid_patch_positions(
-            mask_tensor[:, 0:1, :, :],
+            mask_tensor,
             overlap_percent=overlap_percent
         )
         
         for y_start, y_end, x_start, x_end in tqdm(patch_boxes, desc="Processing patches"):
-            # パッチを直接切り出し
-            patch = input_tensor[..., y_start:y_end, x_start:x_end]
-            
-            with torch.no_grad():
-                processed_patch = self.model.generator(patch)
+            try:
+                # パッチを直接切り出し
+                patch = input_tensor[..., y_start:y_end, x_start:x_end]
                 
-                # ガウシアンウェイト
-                patch_h, patch_w = y_end - y_start, x_end - x_start
-                weight = torch.exp(-((torch.arange(patch_h, device=device) - patch_h/2)**2 / (patch_h/4)**2))[:, None] * \
-                        torch.exp(-((torch.arange(patch_w, device=device) - patch_w/2)**2 / (patch_w/4)**2))[None, :]
-                weight = weight.to(dtype)[None, None, :, :]
+                # パッチが正しいデバイスにあることを確認
+                if patch.device != device:
+                    patch = patch.to(device)
                 
-                # 重みを全チャネルに拡張
-                weight = weight.repeat(1, c, 1, 1)
-                
-                # 出力テンソルに結果を追加
-                output[..., y_start:y_end, x_start:x_end] += processed_patch * weight
-                weights[..., y_start:y_end, x_start:x_end] += weight[:, 0:1]
-                
-                # パッチ位置を記録（デバッグ用）
-                self.patch_positions.append((y_start, y_end, x_start, x_end))
+                with torch.no_grad():
+                    # パッチを生成器に渡す（全チャネルを使用）
+                    processed_patch = self.model.generator(patch)
+                    
+                    # ガウシアンウェイト
+                    patch_h, patch_w = y_end - y_start, x_end - x_start
+                    weight = torch.exp(-((torch.arange(patch_h, device=device) - patch_h/2)**2 / (patch_h/4)**2))[:, None] * \
+                            torch.exp(-((torch.arange(patch_w, device=device) - patch_w/2)**2 / (patch_w/4)**2))[None, :]
+                    weight = weight.to(dtype)[None, None, :, :]
+                    
+                    # 出力テンソルに結果を追加
+                    output[..., y_start:y_end, x_start:x_end] += processed_patch * weight
+                    weights[..., y_start:y_end, x_start:x_end] += weight[:, 0:1]
+                    
+                    self.patch_positions.append((y_start, y_end, x_start, x_end))
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing patch at position ({y_start}, {y_end}, {x_start}, {x_end}): {str(e)}")
+                raise
         
         # 重みで正規化
         valid_mask = weights > 1e-8
-        valid_mask = valid_mask.repeat(1, c, 1, 1)
-        output[valid_mask] /= weights.repeat(1, c, 1, 1)[valid_mask]
+        output = output / weights.repeat(1, 3, 1, 1).where(valid_mask, torch.ones_like(weights))
         
         # マスクの適用
-        output = input_tensor * (1 - mask_tensor) + output * mask_tensor
+        rgb_input = input_tensor[:, :3]
+        output = rgb_input * (1 - mask_tensor) + output * mask_tensor
         
         return output
 
     def process_image(self, input_path: str, mask_path: str, save_path: str):
-        """1枚の画像を処理"""
+        """1枚の画像を処理
+        Args:
+            input_path: 入力画像のパス
+            mask_path: マスク画像のベースパス（拡張子は自動で検出）
+            save_path: 出力画像の保存パス
+        """
         try:
-            # 入力画像の読み込み
+            self.logger.info("=== Processing Image ===")
+            self.logger.info(f"Input: {input_path}")
+            
+            input_tensors = []
+            # RGB画像の読み込み
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"Input image not found: {input_path}")
+            
+            self.logger.info("Loading RGB image...")
             image = Image.open(input_path).convert('RGB')
-            input_tensor = self.transform(image).unsqueeze(0)
+            rgb_tensor = self.transform(image).unsqueeze(0)
+            input_tensors.append(rgb_tensor)
+            self.logger.info(f"RGB tensor shape: {rgb_tensor.shape}")
             
-            # マスクの読み込み
-            mask_tensor = None
-            if not self.cfg.paths.mask_dir.endswith("ignore"):
-                # マスクの読み込み
-                mask = Image.open(mask_path)
-                # 二値化処理を学習時と同じに
-                mask = mask.point(lambda p: p > 128 and 255)
-                # グレースケール変換とテンソル化
-                mask_tensor = self.mask_transform(mask)
-                # マスクのエロージョン処理
-                mask_tensor = self._process_mask(mask_tensor)
+            # 追加チャネルの読み込み
+            self.logger.info("Processing additional channels...")
+            for channel_name, channel_dir in self.additional_channels.items():
+                self.logger.info(f"Processing channel: {channel_name}")
+                self.logger.info(f"Channel directory: {channel_dir}")
                 
-                # デバッグ用の情報出力
-                print(f"Mask shape: {mask_tensor.shape}")
-                print(f"Unique values in mask: {torch.unique(mask_tensor)}")
+                # 対応する画像を探す
+                channel_path = self._find_corresponding_image(channel_dir, input_path)
+                self.logger.info(f"Full channel path: {channel_path}")
                 
-                # チャンネル次元の調整
-                mask_tensor = mask_tensor.unsqueeze(0)  # バッチ次元追加
-            
-            # デバイスとデータ型の設定
-            input_tensor = input_tensor.to(self.device)
-            if mask_tensor is not None:
-                mask_tensor = mask_tensor.to(self.device)
+                if not os.path.exists(channel_path):
+                    raise FileNotFoundError(
+                        f"Required channel {channel_name} not found: {channel_path}"
+                    )
+                
+                self.logger.info("Loading channel image...")
+                channel_image = Image.open(channel_path)
+                channel_tensor = self.transform(channel_image).unsqueeze(0)
+                self.logger.info(f"Channel tensor shape: {channel_tensor.shape}")
+                input_tensors.append(channel_tensor)
+
+            # 入力テンソルの結合
+            input_tensor = torch.cat(input_tensors, dim=1)
+            self.logger.info(f"Combined input tensor shape: {input_tensor.shape}")
             
             if torch.cuda.is_available():
                 input_tensor = input_tensor.half()
-                if mask_tensor is not None:
-                    mask_tensor = mask_tensor.half()
+                self.logger.info("Converted input tensor to half precision")
+
+            # マスクの読み込みと処理
+            mask_dir = os.path.dirname(mask_path)
+            mask_file = os.path.basename(mask_path)
+            mask_path = self._find_corresponding_image(mask_dir, mask_file)
             
-            # パッチベースで画像を処理
+            if not os.path.exists(mask_path):
+                raise FileNotFoundError(f"Mask file not found: {mask_path}")
+            
+            self.logger.info(f"Loading mask from: {mask_path}")
+            mask = Image.open(mask_path)
+            mask = mask.point(lambda p: p > 128 and 255)
+            mask_tensor = self.mask_transform(mask)
+            mask_tensor = self._process_mask(mask_tensor)
+            mask_tensor = mask_tensor.unsqueeze(0)
+            
+            if torch.cuda.is_available():
+                mask_tensor = mask_tensor.half()
+                self.logger.info("Converted mask tensor to half precision")
+
+            # パッチベースの処理
+            self.logger.info("Starting patch-based processing...")
             output_tensor = self.process_large_image(input_tensor, mask_tensor)
             
-            # 結果の保存
-            output_tensor = output_tensor.float()
-            
-            # 値の範囲をチェックして修正
-            print(f"Output tensor range: {output_tensor.min():.3f} to {output_tensor.max():.3f}")
-            
-            # 明示的にクリッピングを行う
-            output_tensor = output_tensor.clamp(-1, 1)
-            image_space = ((output_tensor + 1) * 127.5).clamp(0, 255)
+            # 出力の保存（RGB部分のみ）
+            self.logger.info("Saving output image...")
+            output_rgb = output_tensor[:, :3]  # RGB channels only
+            output_rgb = output_rgb.float().clamp(-1, 1)
+            image_space = ((output_rgb + 1) * 127.5).clamp(0, 255)
             image_space = image_space.permute(0, 2, 3, 1)
-            
-            # float32からuint8への変換前にチェック
-            print(f"Image space range: {image_space.min():.3f} to {image_space.max():.3f}")
-            
-            # 安全な型変換
             image_space = image_space.round().cpu().numpy()[0].astype(np.uint8)
             
-            # 保存前の値の範囲を確認
-            print(f"Final image range: {image_space.min()} to {image_space.max()}")
-            
-            # 生成画像の保存
+            # 画像の保存
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             output_image = Image.fromarray(image_space)
             output_image.save(save_path)
             
-            # デバッグモードの場合、パッチ位置を描画した画像も保存
+            # デバッグモードの場合
             if self.debug_mode:
                 debug_path = str(Path(save_path).with_name(f"debug_{Path(save_path).name}"))
                 debug_image = output_image.copy()
                 debug_image = self._draw_patches(debug_image, self.patch_positions)
                 debug_image.save(debug_path)
-            
-            # メモリの解放
+
+            # メモリ解放
             del input_tensor, output_tensor
             torch.cuda.empty_cache()
             
+            self.logger.info(f"Successfully processed and saved: {save_path}")
+
         except Exception as e:
             self.logger.error(f"Error processing {input_path}: {str(e)}")
-            torch.cuda.empty_cache()
+            self.logger.error(f"Error type: {type(e)}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     def process_directory(self):
@@ -349,8 +611,15 @@ class StyleTransferInference:
         mask_dir = Path(self.cfg.paths.mask_dir)
         output_dir = Path(self.cfg.paths.output_dir)
         
-        if not mask_dir.exists() and not mask_dir.name.endswith("ignore"):
-            raise FileNotFoundError(f"Mask directory not found: {mask_dir}")
+        # 入力ディレクトリのチェック
+        if not input_dir.exists():
+            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+        
+        # マスクディレクトリのチェック（ignoreでない場合）
+        if not mask_dir.name.endswith("ignore"):
+            if not mask_dir.exists():
+                raise FileNotFoundError(f"Mask directory not found: {mask_dir}. Creating full masks.")
+        
         
         output_dir.mkdir(parents=True, exist_ok=True)
         self.logger.info(f"Processing images from {input_dir} to {output_dir}")
