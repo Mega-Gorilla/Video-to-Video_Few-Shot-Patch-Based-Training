@@ -7,3 +7,4 @@ test_dataset/*_gen*
 test_dataset/*test*
 *.log
 /test
+/config
