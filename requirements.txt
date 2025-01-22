@@ -5,3 +5,10 @@ omegaconf
 tensorboard
 netifaces
 PyQt6
+scipy
+scikit-image
+opencv-python
+scikit-learn
+
+cupy-cuda12x
+numba
