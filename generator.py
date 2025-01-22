@@ -18,6 +18,7 @@ from typing import List, Tuple, Optional
 class StyleTransferInference:
     def __init__(self, cfg: DictConfig):
         self.cfg = cfg
+        self.debug_mode = cfg.inference.get('debug_mode', False)
         self._setup_logging()
         self._setup_transforms()
         self._load_data_config()
@@ -25,7 +26,6 @@ class StyleTransferInference:
         
         # パッチサイズを学習時の設定から取得
         self.patch_size = self.cfg.data.patch_size  # データ設定から取得
-        self.debug_mode = cfg.inference.get('debug_mode', False)
         self.patch_positions = []
 
     def _setup_logging(self):
